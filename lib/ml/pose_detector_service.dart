@@ -4,24 +4,30 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'prostration_classifier.dart';
 
 typedef ProstrationDetectedCallback = void Function();
+typedef HeadInfoUpdatedCallback = void Function(HeadInfo info);
 
 /// Сервис для обработки кадров камеры и определения простираний
 class PoseDetectorService {
   final PoseDetector _poseDetector;
   final ProstrationClassifier _classifier;
   final ProstrationDetectedCallback onProstrationDetected;
+  final HeadInfoUpdatedCallback? onHeadInfoUpdated;
 
   bool _isProcessing = false;
 
   PoseDetectorService({
     required this.onProstrationDetected,
+    this.onHeadInfoUpdated,
   })  : _poseDetector = PoseDetector(
           options: PoseDetectorOptions(
             mode: PoseDetectionMode.stream,
-            model: PoseDetectionModel.accurate,
+            model: PoseDetectionModel.base,
           ),
         ),
         _classifier = ProstrationClassifier();
+
+  ProstrationPhase get currentPhase => _classifier.currentPhase;
+  bool get isCalibrated => _classifier.isCalibrated;
 
   /// Обрабатывает кадр с камеры
   Future<void> processImage(
@@ -37,9 +43,39 @@ class PoseDetectorService {
 
       if (poses.isNotEmpty) {
         final pose = poses.first;
-        final prostrationCompleted = _classifier.analyzePose(pose);
+        final imageWidth = cameraImage.width.toDouble();
+        final imageHeight = cameraImage.height.toDouble();
+
+        // Анализируем позу и проверяем простирание
+        final prostrationCompleted = _classifier.analyzePose(
+          pose,
+          imageWidth: imageWidth,
+          imageHeight: imageHeight,
+        );
+
         if (prostrationCompleted) {
           onProstrationDetected();
+        }
+
+        // Передаём информацию о голове для отображения зелёного квадрата
+        if (onHeadInfoUpdated != null) {
+          final headInfo = _classifier.getLastHeadInfo(
+            pose,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+          );
+          if (headInfo != null) {
+            onHeadInfoUpdated!(headInfo);
+          }
+        }
+      } else {
+        // Поза не обнаружена — передаём пустой HeadInfo
+        if (onHeadInfoUpdated != null) {
+          onHeadInfoUpdated!(HeadInfo(
+            confidence: 0.0,
+            phase: _classifier.currentPhase,
+            standingY: _classifier.standingY,
+          ));
         }
       }
     } catch (e) {
