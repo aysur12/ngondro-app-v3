@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import '../../../../ml/pose_detector_service.dart';
 import '../../../../ml/prostration_classifier.dart';
@@ -25,10 +26,37 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
   HeadInfo? _headInfo;
 
+  // Логи диагностики
+  final List<String> _logs = [];
+  final ScrollController _logScrollController = ScrollController();
+  bool _showLogs = false;
+
+  static const int _maxLogs = 200;
+
   @override
   void initState() {
     super.initState();
     _initCamera();
+  }
+
+  void _addLog(String message) {
+    if (!mounted) return;
+    setState(() {
+      _logs.add(message);
+      if (_logs.length > _maxLogs) {
+        _logs.removeAt(0);
+      }
+    });
+    // Автоскролл вниз
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_logScrollController.hasClients) {
+        _logScrollController.animateTo(
+          _logScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 100),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   Future<void> _initCamera() async {
@@ -45,6 +73,10 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
         orElse: () => cameras.first,
       );
 
+      _addLog(
+          'Камера: ${camera.name}, направление: ${camera.lensDirection.name}, '
+          'sensorOrientation: ${camera.sensorOrientation}°');
+
       _controller = CameraController(
         camera,
         ResolutionPreset.medium,
@@ -54,6 +86,10 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
       await _controller!.initialize();
 
+      _addLog('Камера инициализирована: '
+          '${_controller!.value.previewSize?.width.toInt()}x'
+          '${_controller!.value.previewSize?.height.toInt()}');
+
       _poseDetectorService = PoseDetectorService(
         onProstrationDetected: widget.onProstrationDetected,
         onHeadInfoUpdated: (info) {
@@ -61,6 +97,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
             setState(() => _headInfo = info);
           }
         },
+        onLog: _addLog,
       );
 
       await _controller!.startImageStream((image) {
@@ -75,6 +112,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
       }
     } catch (e) {
       setState(() => _error = 'Camera error: $e');
+      _addLog('ОШИБКА камеры: $e');
     }
   }
 
@@ -83,7 +121,25 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     _controller?.stopImageStream();
     _controller?.dispose();
     _poseDetectorService?.dispose();
+    _logScrollController.dispose();
     super.dispose();
+  }
+
+  /// Копирует диагностику в буфер обмена
+  Future<void> _copyDiagnostics() async {
+    final diagnostics =
+        _poseDetectorService?.getDiagnostics() ?? '(сервис не инициализирован)';
+    final logsText = _logs.join('\n');
+    final text = '$diagnostics\n\n=== Логи ===\n$logsText';
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Диагностика скопирована в буфер обмена'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   /// Цвет квадрата в зависимости от фазы простирания
@@ -185,11 +241,25 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                   ),
                 ],
               ),
-              if (headInfo != null && headInfo.isDetected)
-                Text(
-                  '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : ''} ${(headInfo.confidence * 100).toStringAsFixed(0)}%',
-                  style: const TextStyle(color: Colors.grey, fontSize: 11),
-                ),
+              Row(
+                children: [
+                  if (headInfo != null && headInfo.isDetected)
+                    Text(
+                      '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : ''} ${(headInfo.confidence * 100).toStringAsFixed(0)}%',
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    ),
+                  const SizedBox(width: 8),
+                  // Кнопка показа/скрытия логов
+                  GestureDetector(
+                    onTap: () => setState(() => _showLogs = !_showLogs),
+                    child: Icon(
+                      _showLogs ? Icons.bug_report : Icons.bug_report_outlined,
+                      size: 20,
+                      color: _showLogs ? Colors.amber : Colors.grey,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -226,7 +296,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                   ),
 
                 // Подсказка во время калибровки
-                if (!isCalibrated)
+                if (!isCalibrated && !_showLogs)
                   Positioned(
                     bottom: 12,
                     left: 0,
@@ -243,6 +313,112 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                           'Встаньте прямо перед камерой',
                           style: TextStyle(color: Colors.white, fontSize: 13),
                         ),
+                      ),
+                    ),
+                  ),
+
+                // Панель логов
+                if (_showLogs)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black87,
+                      child: Column(
+                        children: [
+                          // Заголовок панели логов
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                            color: Colors.black,
+                            child: Row(
+                              children: [
+                                const Icon(Icons.terminal,
+                                    color: Colors.green, size: 16),
+                                const SizedBox(width: 6),
+                                const Expanded(
+                                  child: Text(
+                                    'Диагностика',
+                                    style: TextStyle(
+                                      color: Colors.green,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                // Кнопка копирования
+                                GestureDetector(
+                                  onTap: _copyDiagnostics,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.green.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                          color: Colors.green
+                                              .withValues(alpha: 0.5)),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.copy,
+                                            color: Colors.green, size: 14),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          'Копировать',
+                                          style: TextStyle(
+                                            color: Colors.green,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                // Кнопка очистки
+                                GestureDetector(
+                                  onTap: () => setState(() => _logs.clear()),
+                                  child: const Icon(Icons.clear_all,
+                                      color: Colors.grey, size: 18),
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Список логов
+                          Expanded(
+                            child: ListView.builder(
+                              controller: _logScrollController,
+                              padding: const EdgeInsets.all(6),
+                              itemCount: _logs.length,
+                              itemBuilder: (context, index) {
+                                final log = _logs[index];
+                                Color textColor = Colors.grey[400]!;
+                                if (log.contains('ОШИБКА') ||
+                                    log.contains('Error')) {
+                                  textColor = Colors.red[300]!;
+                                } else if (log.contains('загружена') ||
+                                    log.contains('ЗАСЧИТАНО')) {
+                                  textColor = Colors.green[300]!;
+                                } else if (log.contains('Ошибка')) {
+                                  textColor = Colors.orange[300]!;
+                                }
+                                return Padding(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 1),
+                                  child: Text(
+                                    log,
+                                    style: TextStyle(
+                                      color: textColor,
+                                      fontSize: 10,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),

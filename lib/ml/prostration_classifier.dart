@@ -1,4 +1,3 @@
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import '../core/constants/app_constants.dart';
 
 /// Фазы простирания
@@ -15,6 +14,41 @@ enum BodyTrackingSource {
   shoulders, // Плечи (основной)
   hips, // Бёдра (fallback)
   none, // Не определено
+}
+
+/// Индексы ключевых точек MoveNet (17 точек COCO-формата)
+class MoveNetLandmark {
+  static const int nose = 0;
+  static const int leftEye = 1;
+  static const int rightEye = 2;
+  static const int leftEar = 3;
+  static const int rightEar = 4;
+  static const int leftShoulder = 5;
+  static const int rightShoulder = 6;
+  static const int leftElbow = 7;
+  static const int rightElbow = 8;
+  static const int leftWrist = 9;
+  static const int rightWrist = 10;
+  static const int leftHip = 11;
+  static const int rightHip = 12;
+  static const int leftKnee = 13;
+  static const int rightKnee = 14;
+  static const int leftAnkle = 15;
+  static const int rightAnkle = 16;
+}
+
+/// Одна ключевая точка тела из MoveNet
+class PoseLandmark {
+  /// Нормализованная Y (0.0 = верх, 1.0 = низ)
+  final double y;
+
+  /// Нормализованная X (0.0 = левый край, 1.0 = правый)
+  final double x;
+
+  /// Уверенность (0.0..1.0)
+  final double score;
+
+  const PoseLandmark({required this.y, required this.x, required this.score});
 }
 
 /// Информация о положении тела для отображения
@@ -62,11 +96,11 @@ class ProstrationClassifier {
   double? get standingY => _standingY;
   bool get isCalibrated => _standingY != null;
 
-  /// Анализирует позу и возвращает true если простирание завершено.
-  /// [imageWidth] и [imageHeight] — размеры изображения в пикселях.
-  bool analyzePose(Pose pose,
-      {double imageWidth = 1.0, double imageHeight = 1.0}) {
-    final bodyInfo = _extractBodyPosition(pose, imageWidth, imageHeight);
+  /// Анализирует список точек (17 точек MoveNet) и возвращает true если
+  /// простирание завершено.
+  /// [landmarks] — список из 17 точек [PoseLandmark].
+  bool analyzeLandmarks(List<PoseLandmark> landmarks) {
+    final bodyInfo = _extractBodyPosition(landmarks);
     if (!bodyInfo.isDetected) return false;
 
     final bodyY = bodyInfo.normalizedY!;
@@ -140,23 +174,29 @@ class ProstrationClassifier {
     return false;
   }
 
-  /// Извлекает нормализованное положение тела из позы.
+  /// Извлекает нормализованное положение тела из списка точек MoveNet.
   /// Основная точка: плечи (среднее leftShoulder + rightShoulder).
   /// Fallback: бёдра (среднее leftHip + rightHip).
-  HeadInfo _extractBodyPosition(
-      Pose pose, double imageWidth, double imageHeight) {
-    // Пробуем плечи
-    final leftShoulder = pose.landmarks[PoseLandmarkType.leftShoulder];
-    final rightShoulder = pose.landmarks[PoseLandmarkType.rightShoulder];
-
-    if (leftShoulder != null &&
-        rightShoulder != null &&
-        leftShoulder.likelihood >= AppConstants.minPoseConfidence &&
-        rightShoulder.likelihood >= AppConstants.minPoseConfidence) {
+  HeadInfo _extractBodyPosition(List<PoseLandmark> landmarks) {
+    if (landmarks.length < 17) {
       return HeadInfo(
-        normalizedX: (leftShoulder.x + rightShoulder.x) / 2 / imageWidth,
-        normalizedY: (leftShoulder.y + rightShoulder.y) / 2 / imageHeight,
-        confidence: (leftShoulder.likelihood + rightShoulder.likelihood) / 2,
+        confidence: 0.0,
+        phase: _currentPhase,
+        standingY: _standingY,
+        source: BodyTrackingSource.none,
+      );
+    }
+
+    // Пробуем плечи
+    final leftShoulder = landmarks[MoveNetLandmark.leftShoulder];
+    final rightShoulder = landmarks[MoveNetLandmark.rightShoulder];
+
+    if (leftShoulder.score >= AppConstants.minPoseConfidence &&
+        rightShoulder.score >= AppConstants.minPoseConfidence) {
+      return HeadInfo(
+        normalizedX: (leftShoulder.x + rightShoulder.x) / 2,
+        normalizedY: (leftShoulder.y + rightShoulder.y) / 2,
+        confidence: (leftShoulder.score + rightShoulder.score) / 2,
         phase: _currentPhase,
         standingY: _standingY,
         source: BodyTrackingSource.shoulders,
@@ -164,17 +204,15 @@ class ProstrationClassifier {
     }
 
     // Fallback: бёдра
-    final leftHip = pose.landmarks[PoseLandmarkType.leftHip];
-    final rightHip = pose.landmarks[PoseLandmarkType.rightHip];
+    final leftHip = landmarks[MoveNetLandmark.leftHip];
+    final rightHip = landmarks[MoveNetLandmark.rightHip];
 
-    if (leftHip != null &&
-        rightHip != null &&
-        leftHip.likelihood >= AppConstants.minPoseConfidence &&
-        rightHip.likelihood >= AppConstants.minPoseConfidence) {
+    if (leftHip.score >= AppConstants.minPoseConfidence &&
+        rightHip.score >= AppConstants.minPoseConfidence) {
       return HeadInfo(
-        normalizedX: (leftHip.x + rightHip.x) / 2 / imageWidth,
-        normalizedY: (leftHip.y + rightHip.y) / 2 / imageHeight,
-        confidence: (leftHip.likelihood + rightHip.likelihood) / 2,
+        normalizedX: (leftHip.x + rightHip.x) / 2,
+        normalizedY: (leftHip.y + rightHip.y) / 2,
+        confidence: (leftHip.score + rightHip.score) / 2,
         phase: _currentPhase,
         standingY: _standingY,
         source: BodyTrackingSource.hips,
@@ -190,9 +228,8 @@ class ProstrationClassifier {
   }
 
   /// Получить текущую информацию о точке тела (для отображения)
-  HeadInfo? getLastHeadInfo(Pose pose,
-      {double imageWidth = 1.0, double imageHeight = 1.0}) {
-    return _extractBodyPosition(pose, imageWidth, imageHeight);
+  HeadInfo getLastHeadInfo(List<PoseLandmark> landmarks) {
+    return _extractBodyPosition(landmarks);
   }
 
   /// Сброс состояния — начинаем калибровку заново
