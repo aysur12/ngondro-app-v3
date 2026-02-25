@@ -1,11 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import '../../../../ml/pose_detector_service.dart';
 import '../../../../ml/prostration_classifier.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../services/sound_service.dart';
 
-/// Виджет предпросмотра камеры с ML pose detection и отображением позиции тела
+/// Виджет предпросмотра камеры с MoveNet pose detection
 class CameraPreviewWidget extends StatefulWidget {
   final VoidCallback onProstrationDetected;
 
@@ -21,16 +23,24 @@ class CameraPreviewWidget extends StatefulWidget {
 class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   CameraController? _controller;
   PoseDetectorService? _poseDetectorService;
+  final SoundService _soundService = SoundService();
+
   bool _isInitialized = false;
   String? _error;
 
   HeadInfo? _headInfo;
 
+  // Флаг: звук калибровки-старт уже запущен
+  bool _calibrationStartSoundPlayed = false;
+
+  // Прогресс воспроизведения calibration-end аудио (0.0..1.0)
+  double _calibrationEndAudioProgress = 0.0;
+  Timer? _audioProgressTimer;
+
   // Логи диагностики
   final List<String> _logs = [];
   final ScrollController _logScrollController = ScrollController();
   bool _showLogs = false;
-
   static const int _maxLogs = 200;
 
   @override
@@ -43,11 +53,8 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     if (!mounted) return;
     setState(() {
       _logs.add(message);
-      if (_logs.length > _maxLogs) {
-        _logs.removeAt(0);
-      }
+      if (_logs.length > _maxLogs) _logs.removeAt(0);
     });
-    // Автоскролл вниз
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_logScrollController.hasClients) {
         _logScrollController.animateTo(
@@ -67,14 +74,13 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
         return;
       }
 
-      // Предпочитаем фронтальную камеру для простираний
       final camera = cameras.firstWhere(
         (c) => c.lensDirection == CameraLensDirection.front,
         orElse: () => cameras.first,
       );
 
-      _addLog(
-          'Камера: ${camera.name}, направление: ${camera.lensDirection.name}, '
+      _addLog('Камера: ${camera.name}, '
+          'направление: ${camera.lensDirection.name}, '
           'sensorOrientation: ${camera.sensorOrientation}°');
 
       _controller = CameraController(
@@ -92,9 +98,17 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
       _poseDetectorService = PoseDetectorService(
         onProstrationDetected: widget.onProstrationDetected,
+        onCalibrationCompleted: _onCalibrationCompleted,
         onHeadInfoUpdated: (info) {
           if (mounted) {
             setState(() => _headInfo = info);
+            // Запускаем звук старта калибровки при первом определении позы
+            if (!_calibrationStartSoundPlayed &&
+                info.phase == ProstrationPhase.calibrating &&
+                info.isDetected) {
+              _calibrationStartSoundPlayed = true;
+              _soundService.playCalibrationStart();
+            }
           }
         },
         onLog: _addLog,
@@ -116,16 +130,59 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     }
   }
 
+  /// Вызывается когда классификатор зафиксировал Точку X (5 сек стабильности)
+  void _onCalibrationCompleted() {
+    if (!mounted) return;
+    // Запускаем звук завершения калибровки
+    // Когда звук закончится — уведомляем классификатор начать фазу standing
+    _soundService.playCalibrationEnd(
+      onComplete: _onCalibrationAudioFinished,
+    );
+    // Запускаем таймер для отображения прогресса аудио
+    // Оцениваем длительность аудио (~3-5 сек), обновляем каждые 100мс
+    _startAudioProgressTimer();
+  }
+
+  void _startAudioProgressTimer() {
+    _calibrationEndAudioProgress = 0.0;
+    const totalMs = 4000; // предполагаемая длительность аудио в мс
+    const stepMs = 100;
+    int elapsed = 0;
+
+    _audioProgressTimer?.cancel();
+    _audioProgressTimer =
+        Timer.periodic(const Duration(milliseconds: stepMs), (timer) {
+      elapsed += stepMs;
+      if (mounted) {
+        setState(() {
+          _calibrationEndAudioProgress = (elapsed / totalMs).clamp(0.0, 1.0);
+        });
+      }
+      if (elapsed >= totalMs) {
+        timer.cancel();
+      }
+    });
+  }
+
+  void _onCalibrationAudioFinished() {
+    _audioProgressTimer?.cancel();
+    if (mounted) {
+      setState(() => _calibrationEndAudioProgress = 1.0);
+    }
+    _poseDetectorService?.onCalibrationAudioFinished();
+  }
+
   @override
   void dispose() {
+    _audioProgressTimer?.cancel();
     _controller?.stopImageStream();
     _controller?.dispose();
     _poseDetectorService?.dispose();
+    _soundService.dispose();
     _logScrollController.dispose();
     super.dispose();
   }
 
-  /// Копирует диагностику в буфер обмена
   Future<void> _copyDiagnostics() async {
     final diagnostics =
         _poseDetectorService?.getDiagnostics() ?? '(сервис не инициализирован)';
@@ -142,11 +199,12 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     }
   }
 
-  /// Цвет квадрата в зависимости от фазы простирания
   Color _getHeadBoxColor(ProstrationPhase phase) {
     switch (phase) {
       case ProstrationPhase.calibrating:
         return Colors.yellow;
+      case ProstrationPhase.calibrationComplete:
+        return Colors.teal;
       case ProstrationPhase.standing:
         return Colors.green;
       case ProstrationPhase.goingDown:
@@ -158,12 +216,12 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     }
   }
 
-  /// Текстовый статус фазы
   String _getPhaseLabel(ProstrationPhase phase, bool isCalibrated) {
-    if (!isCalibrated) return 'Калибровка...';
     switch (phase) {
       case ProstrationPhase.calibrating:
         return 'Калибровка...';
+      case ProstrationPhase.calibrationComplete:
+        return 'Калибровка завершена';
       case ProstrationPhase.standing:
         return 'Стоит';
       case ProstrationPhase.goingDown:
@@ -187,11 +245,9 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
               const Icon(Icons.camera_alt_outlined,
                   size: 64, color: Colors.grey),
               const SizedBox(height: 16),
-              Text(
-                _error!,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.grey),
-              ),
+              Text(_error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.grey)),
             ],
           ),
         ),
@@ -206,10 +262,11 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     final phase = headInfo?.phase ?? ProstrationPhase.calibrating;
     final isCalibrated = headInfo?.standingY != null;
     final boxColor = _getHeadBoxColor(phase);
+    final calibProgress = headInfo?.calibrationProgress ?? 0.0;
 
     return Column(
       children: [
-        // Статус-бар с индикатором фазы
+        // Статус-бар
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -225,10 +282,8 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                   Container(
                     width: 10,
                     height: 10,
-                    decoration: BoxDecoration(
-                      color: boxColor,
-                      shape: BoxShape.circle,
-                    ),
+                    decoration:
+                        BoxDecoration(color: boxColor, shape: BoxShape.circle),
                   ),
                   const SizedBox(width: 8),
                   Text(
@@ -245,11 +300,11 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                 children: [
                   if (headInfo != null && headInfo.isDetected)
                     Text(
-                      '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : ''} ${(headInfo.confidence * 100).toStringAsFixed(0)}%',
+                      '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : headInfo.source == BodyTrackingSource.lastKnown ? 'Память' : ''} '
+                      '${headInfo.source != BodyTrackingSource.lastKnown ? '${(headInfo.confidence * 100).toStringAsFixed(0)}%' : ''}',
                       style: const TextStyle(color: Colors.grey, fontSize: 11),
                     ),
                   const SizedBox(width: 8),
-                  // Кнопка показа/скрытия логов
                   GestureDetector(
                     onTap: () => setState(() => _showLogs = !_showLogs),
                     child: Icon(
@@ -264,7 +319,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
           ),
         ),
 
-        // Превью камеры с наложением
+        // Превью камеры
         Expanded(
           child: ClipRRect(
             borderRadius:
@@ -278,7 +333,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                   child: CameraPreview(_controller!),
                 ),
 
-                // Наложение: квадрат вокруг отслеживаемой точки тела
+                // Квадрат отслеживания точки тела
                 if (headInfo != null && headInfo.isDetected)
                   LayoutBuilder(
                     builder: (context, constraints) {
@@ -286,142 +341,25 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                         painter: HeadBoxPainter(
                           headInfo: headInfo,
                           color: boxColor,
-                          canvasSize: Size(
-                            constraints.maxWidth,
-                            constraints.maxHeight,
-                          ),
+                          canvasSize:
+                              Size(constraints.maxWidth, constraints.maxHeight),
                         ),
                       );
                     },
                   ),
 
-                // Подсказка во время калибровки
-                if (!isCalibrated && !_showLogs)
-                  Positioned(
-                    bottom: 12,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'Встаньте прямо перед камерой',
-                          style: TextStyle(color: Colors.white, fontSize: 13),
-                        ),
-                      ),
-                    ),
+                // Оверлей калибровки (фаза calibrating)
+                if (phase == ProstrationPhase.calibrating && !_showLogs)
+                  _CalibrationOverlay(calibrationProgress: calibProgress),
+
+                // Оверлей завершения калибровки (фаза calibrationComplete)
+                if (phase == ProstrationPhase.calibrationComplete && !_showLogs)
+                  _CalibrationCompleteOverlay(
+                    audioProgress: _calibrationEndAudioProgress,
                   ),
 
                 // Панель логов
-                if (_showLogs)
-                  Positioned.fill(
-                    child: Container(
-                      color: Colors.black87,
-                      child: Column(
-                        children: [
-                          // Заголовок панели логов
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 6),
-                            color: Colors.black,
-                            child: Row(
-                              children: [
-                                const Icon(Icons.terminal,
-                                    color: Colors.green, size: 16),
-                                const SizedBox(width: 6),
-                                const Expanded(
-                                  child: Text(
-                                    'Диагностика',
-                                    style: TextStyle(
-                                      color: Colors.green,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                // Кнопка копирования
-                                GestureDetector(
-                                  onTap: _copyDiagnostics,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color:
-                                          Colors.green.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(
-                                          color: Colors.green
-                                              .withValues(alpha: 0.5)),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.copy,
-                                            color: Colors.green, size: 14),
-                                        SizedBox(width: 4),
-                                        Text(
-                                          'Копировать',
-                                          style: TextStyle(
-                                            color: Colors.green,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                // Кнопка очистки
-                                GestureDetector(
-                                  onTap: () => setState(() => _logs.clear()),
-                                  child: const Icon(Icons.clear_all,
-                                      color: Colors.grey, size: 18),
-                                ),
-                              ],
-                            ),
-                          ),
-                          // Список логов
-                          Expanded(
-                            child: ListView.builder(
-                              controller: _logScrollController,
-                              padding: const EdgeInsets.all(6),
-                              itemCount: _logs.length,
-                              itemBuilder: (context, index) {
-                                final log = _logs[index];
-                                Color textColor = Colors.grey[400]!;
-                                if (log.contains('ОШИБКА') ||
-                                    log.contains('Error')) {
-                                  textColor = Colors.red[300]!;
-                                } else if (log.contains('загружена') ||
-                                    log.contains('ЗАСЧИТАНО')) {
-                                  textColor = Colors.green[300]!;
-                                } else if (log.contains('Ошибка')) {
-                                  textColor = Colors.orange[300]!;
-                                }
-                                return Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 1),
-                                  child: Text(
-                                    log,
-                                    style: TextStyle(
-                                      color: textColor,
-                                      fontSize: 10,
-                                      fontFamily: 'monospace',
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                if (_showLogs) _buildLogsPanel(),
               ],
             ),
           ),
@@ -429,9 +367,219 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
       ],
     );
   }
+
+  Widget _buildLogsPanel() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black87,
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: Colors.black,
+              child: Row(
+                children: [
+                  const Icon(Icons.terminal, color: Colors.green, size: 16),
+                  const SizedBox(width: 6),
+                  const Expanded(
+                    child: Text('Диагностика',
+                        style: TextStyle(
+                            color: Colors.green,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                  GestureDetector(
+                    onTap: _copyDiagnostics,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                            color: Colors.green.withValues(alpha: 0.5)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.copy, color: Colors.green, size: 14),
+                          SizedBox(width: 4),
+                          Text('Копировать',
+                              style:
+                                  TextStyle(color: Colors.green, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () => setState(() => _logs.clear()),
+                    child: const Icon(Icons.clear_all,
+                        color: Colors.grey, size: 18),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: _logScrollController,
+                padding: const EdgeInsets.all(6),
+                itemCount: _logs.length,
+                itemBuilder: (context, index) {
+                  final log = _logs[index];
+                  Color textColor = Colors.grey[400]!;
+                  if (log.contains('ОШИБКА') || log.contains('Error')) {
+                    textColor = Colors.red[300]!;
+                  } else if (log.contains('загружена') ||
+                      log.contains('ЗАСЧИТАНО') ||
+                      log.contains('ЗАВЕРШЕНА')) {
+                    textColor = Colors.green[300]!;
+                  } else if (log.contains('Ошибка')) {
+                    textColor = Colors.orange[300]!;
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(log,
+                        style: TextStyle(
+                            color: textColor,
+                            fontSize: 10,
+                            fontFamily: 'monospace')),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-/// Рисует квадрат вокруг отслеживаемой точки тела (плечи или бёдра)
+/// Оверлей во время калибровки (5 секунд стабильности)
+class _CalibrationOverlay extends StatelessWidget {
+  final double calibrationProgress;
+
+  const _CalibrationOverlay({required this.calibrationProgress});
+
+  @override
+  Widget build(BuildContext context) {
+    final progressPercent = (calibrationProgress * 100).toInt();
+    final remaining = AppConstants.calibrationDurationSeconds -
+        (calibrationProgress * AppConstants.calibrationDurationSeconds).floor();
+
+    return Positioned(
+      bottom: 16,
+      left: 16,
+      right: 16,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.75),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              children: [
+                const Text(
+                  'Встаньте прямо перед камерой\nи не двигайтесь 5 секунд',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // Прогресс-бар
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: calibrationProgress,
+                    minHeight: 6,
+                    backgroundColor: Colors.white24,
+                    valueColor:
+                        const AlwaysStoppedAnimation<Color>(Colors.yellow),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  calibrationProgress < 0.05
+                      ? 'Ожидание...'
+                      : '$progressPercent% • осталось ${remaining}с',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Оверлей после завершения калибровки (воспроизведение аудио)
+class _CalibrationCompleteOverlay extends StatelessWidget {
+  final double audioProgress;
+
+  const _CalibrationCompleteOverlay({required this.audioProgress});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      bottom: 16,
+      left: 16,
+      right: 16,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.75),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Калибровка завершена!\nМожете начинать простирания',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: audioProgress,
+                minHeight: 6,
+                backgroundColor: Colors.white24,
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(Colors.tealAccent),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.volume_up, color: Colors.tealAccent, size: 14),
+                const SizedBox(width: 4),
+                Text(
+                  'Воспроизведение...',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Рисует квадрат вокруг отслеживаемой точки тела
 class HeadBoxPainter extends CustomPainter {
   final HeadInfo headInfo;
   final Color color;
@@ -449,8 +597,6 @@ class HeadBoxPainter extends CustomPainter {
 
     final cx = headInfo.normalizedX! * size.width;
     final cy = headInfo.normalizedY! * size.height;
-
-    // Размер квадрата: пропорционален ширине холста
     final boxHalf = size.width * AppConstants.headBoxSize;
 
     final rect = Rect.fromCenter(
@@ -459,39 +605,37 @@ class HeadBoxPainter extends CustomPainter {
       height: boxHalf * 2,
     );
 
-    // Рисуем квадрат
+    // Используем пунктир если temporal smoothing (lastKnown)
+    final isLastKnown = headInfo.source == BodyTrackingSource.lastKnown;
+    final strokeWidth = isLastKnown ? 1.5 : 2.5;
+
     final paint = Paint()
-      ..color = color
+      ..color = color.withValues(alpha: isLastKnown ? 0.5 : 1.0)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5;
+      ..strokeWidth = strokeWidth;
 
     canvas.drawRect(rect, paint);
 
-    // Уголки квадрата (акцент)
+    // Уголки квадрата
     final cornerPaint = Paint()
-      ..color = color
+      ..color = color.withValues(alpha: isLastKnown ? 0.4 : 1.0)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 4.0
+      ..strokeWidth = isLastKnown ? 2.0 : 4.0
       ..strokeCap = StrokeCap.round;
 
     final cornerLen = boxHalf * 0.35;
-
-    // Верхний левый
     canvas.drawLine(
         rect.topLeft, rect.topLeft + Offset(cornerLen, 0), cornerPaint);
     canvas.drawLine(
         rect.topLeft, rect.topLeft + Offset(0, cornerLen), cornerPaint);
-    // Верхний правый
     canvas.drawLine(
         rect.topRight, rect.topRight + Offset(-cornerLen, 0), cornerPaint);
     canvas.drawLine(
         rect.topRight, rect.topRight + Offset(0, cornerLen), cornerPaint);
-    // Нижний левый
     canvas.drawLine(
         rect.bottomLeft, rect.bottomLeft + Offset(cornerLen, 0), cornerPaint);
     canvas.drawLine(
         rect.bottomLeft, rect.bottomLeft + Offset(0, -cornerLen), cornerPaint);
-    // Нижний правый
     canvas.drawLine(rect.bottomRight, rect.bottomRight + Offset(-cornerLen, 0),
         cornerPaint);
     canvas.drawLine(rect.bottomRight, rect.bottomRight + Offset(0, -cornerLen),
@@ -499,20 +643,18 @@ class HeadBoxPainter extends CustomPainter {
 
     // Центральная точка
     final dotPaint = Paint()
-      ..color = color
+      ..color = color.withValues(alpha: isLastKnown ? 0.4 : 1.0)
       ..style = PaintingStyle.fill;
-    canvas.drawCircle(Offset(cx, cy), 3, dotPaint);
+    canvas.drawCircle(Offset(cx, cy), isLastKnown ? 2 : 3, dotPaint);
 
-    // Горизонтальная линия "стоячей" позиции (если откалибровано)
+    // Горизонтальная пунктирная линия Точки X
     if (headInfo.standingY != null) {
       final standingPy = headInfo.standingY! * size.height;
       final linePaint = Paint()
         ..color = Colors.green.withValues(alpha: 0.5)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0
-        ..strokeJoin = StrokeJoin.miter;
+        ..strokeWidth = 1.0;
 
-      // Пунктирная линия уровня головы в стоячем положении
       _drawDashedLine(
         canvas,
         Offset(0, standingPy),

@@ -10,6 +10,12 @@ class AppConstants {
   // Sound asset path
   static const String bellSoundPath = 'sounds/bell.mp3';
 
+  // Voice calibration sounds (language: en)
+  static const String calibrationStartSoundPath =
+      'sounds/voice/en/calibration-start.mp3';
+  static const String calibrationEndSoundPath =
+      'sounds/voice/en/calibration-end.mp3';
+
   // Body tracking thresholds (normalized 0.0..1.0, Y-axis: 0=top, 1=bottom)
   // Основная точка: плечи; fallback: бёдра.
   // Порог опускания: если точка опустилась на X% от высоты кадра ниже
@@ -19,8 +25,14 @@ class AppConstants {
   // Порог возврата: точка должна вернуться в пределах X% от стоячей позиции
   static const double headUpThreshold = 0.10;
 
-  // Количество кадров для автокалибровки стоячей позиции
+  // Количество кадров для автокалибровки стоячей позиции (legacy — больше не используется)
   static const int calibrationFrames = 30;
+
+  // Длительность калибровки в секундах (человек должен стоять неподвижно)
+  static const int calibrationDurationSeconds = 5;
+
+  // Порог движения при калибровке: если Y изменился менее чем на X% — считаем неподвижным
+  static const double calibrationMovementThreshold = 0.03;
 
   // Время между засчитыванием простираний (мс) — защита от дублей
   static const int prostrationCooldownMs = 1500;

@@ -2,10 +2,11 @@ import '../core/constants/app_constants.dart';
 
 /// Фазы простирания
 enum ProstrationPhase {
-  calibrating, // Идёт калибровка "стоячей" позиции
+  calibrating, // Идёт калибровка — человек стоит неподвижно
+  calibrationComplete, // Калибровка завершена, воспроизводится аудио
   standing, // Стоит прямо (верхняя точка)
   goingDown, // Опускается
-  prostrated, // Внизу (голова на уровне пола)
+  prostrated, // Внизу (лёжа на полу)
   gettingUp, // Поднимается
 }
 
@@ -13,6 +14,7 @@ enum ProstrationPhase {
 enum BodyTrackingSource {
   shoulders, // Плечи (основной)
   hips, // Бёдра (fallback)
+  lastKnown, // Последнее известное положение (temporal smoothing)
   none, // Не определено
 }
 
@@ -63,11 +65,14 @@ class HeadInfo {
   /// Текущая фаза простирания
   final ProstrationPhase phase;
 
-  /// Нормализованная Y-позиция "стоячего" положения (после калибровки)
+  /// Нормализованная Y-позиция "стоячего" положения (Точка X, после калибровки)
   final double? standingY;
 
   /// Источник точки, по которой идёт отслеживание
   final BodyTrackingSource source;
+
+  /// Прогресс калибровки (0.0..1.0) — сколько прошло из 5 секунд
+  final double calibrationProgress;
 
   const HeadInfo({
     this.normalizedX,
@@ -76,18 +81,42 @@ class HeadInfo {
     required this.phase,
     this.standingY,
     this.source = BodyTrackingSource.none,
+    this.calibrationProgress = 0.0,
   });
 
   bool get isDetected => normalizedX != null && normalizedY != null;
 }
 
-/// Классификатор простираний на основе отслеживания положения плеч/бёдер
+/// Результат анализа позы
+class PoseAnalysisResult {
+  /// Простирание засчитано
+  final bool prostrationCompleted;
+
+  /// Калибровка только что завершилась (нужно воспроизвести аудио)
+  final bool calibrationJustCompleted;
+
+  const PoseAnalysisResult({
+    this.prostrationCompleted = false,
+    this.calibrationJustCompleted = false,
+  });
+}
+
+/// Классификатор простираний.
+/// Новая логика:
+/// 1. Калибровка: 5 секунд стабильности плеч → запоминаем Точку X
+/// 2. Temporal smoothing: при потере плеч используем последнее известное Y
+/// 3. Простирание: Y вернулся в пределах headUpThreshold от Точки X
 class ProstrationClassifier {
   ProstrationPhase _currentPhase = ProstrationPhase.calibrating;
 
-  // Калибровка: накапливаем Y-позиции в "стоячем" положении
-  final List<double> _calibrationSamples = [];
-  double? _standingY; // Нормализованная Y-позиция когда человек стоит
+  // Калибровка
+  DateTime? _calibrationStableStart; // Когда начался неподвижный период
+  double? _calibrationReferenceY; // Y при начале неподвижного периода
+  double? _standingY; // Точка X — окончательная стоячая позиция
+
+  // Temporal smoothing — последнее известное положение плеч
+  double? _lastKnownY;
+  double? _lastKnownX;
 
   // Защита от двойного засчитывания
   DateTime? _lastProstrationTime;
@@ -96,39 +125,101 @@ class ProstrationClassifier {
   double? get standingY => _standingY;
   bool get isCalibrated => _standingY != null;
 
-  /// Анализирует список точек (17 точек MoveNet) и возвращает true если
-  /// простирание завершено.
-  /// [landmarks] — список из 17 точек [PoseLandmark].
-  bool analyzeLandmarks(List<PoseLandmark> landmarks) {
-    final bodyInfo = _extractBodyPosition(landmarks);
-    if (!bodyInfo.isDetected) return false;
+  /// Вызывается извне когда воспроизведение calibration-end.mp3 завершилось.
+  /// После этого начинается фаза standing.
+  void onCalibrationAudioFinished() {
+    if (_currentPhase == ProstrationPhase.calibrationComplete) {
+      _currentPhase = ProstrationPhase.standing;
+    }
+  }
 
-    final bodyY = bodyInfo.normalizedY!;
+  /// Анализирует список точек (17 точек MoveNet).
+  /// Возвращает [PoseAnalysisResult].
+  PoseAnalysisResult analyzeLandmarks(List<PoseLandmark> landmarks) {
+    // Пробуем получить реальное положение плеч/бёдер
+    final detected = _detectBodyPosition(landmarks);
+
+    // Обновляем temporal smoothing
+    if (detected != null) {
+      _lastKnownY = detected.y;
+      _lastKnownX = detected.x;
+    }
+
+    // Определяем Y для анализа
+    final double bodyY;
+
+    if (detected != null) {
+      bodyY = detected.y;
+    } else if (_lastKnownY != null) {
+      // Temporal smoothing: используем последнее известное положение
+      bodyY = _lastKnownY!;
+    } else {
+      // Нет данных вообще
+      return const PoseAnalysisResult();
+    }
 
     // --- Калибровка ---
     if (_currentPhase == ProstrationPhase.calibrating) {
-      _calibrationSamples.add(bodyY);
-      if (_calibrationSamples.length >= AppConstants.calibrationFrames) {
-        // Берём медиану для устойчивости к выбросам
-        _calibrationSamples.sort();
-        _standingY = _calibrationSamples[_calibrationSamples.length ~/ 2];
-        _currentPhase = ProstrationPhase.standing;
-      }
-      return false;
+      return _handleCalibration(bodyY);
     }
 
-    if (_standingY == null) return false;
+    // Ждём окончания аудио
+    if (_currentPhase == ProstrationPhase.calibrationComplete) {
+      return const PoseAnalysisResult();
+    }
 
-    // Насколько точка опустилась ниже стоячей позиции
-    // (в нормализованных координатах, Y растёт вниз)
-    final dropFromStanding = bodyY - _standingY!;
+    final standingY = _standingY;
+    if (standingY == null) return const PoseAnalysisResult();
 
+    // Насколько точка опустилась ниже Точки X
+    final dropFromStanding = bodyY - standingY;
+
+    return _updatePhase(dropFromStanding);
+  }
+
+  /// Обрабатывает калибровочную фазу.
+  /// Проверяет стабильность Y в течение 5 секунд.
+  PoseAnalysisResult _handleCalibration(double bodyY) {
+    final now = DateTime.now();
+
+    if (_calibrationReferenceY == null) {
+      // Первое определение — запоминаем стартовую Y
+      _calibrationReferenceY = bodyY;
+      _calibrationStableStart = now;
+      return const PoseAnalysisResult();
+    }
+
+    final delta = (bodyY - _calibrationReferenceY!).abs();
+
+    if (delta > AppConstants.calibrationMovementThreshold) {
+      // Человек двинулся — сбрасываем таймер
+      _calibrationReferenceY = bodyY;
+      _calibrationStableStart = now;
+      return const PoseAnalysisResult();
+    }
+
+    // Человек стоит неподвижно — проверяем время
+    final stableDuration =
+        now.difference(_calibrationStableStart!).inMilliseconds / 1000.0;
+
+    if (stableDuration >= AppConstants.calibrationDurationSeconds) {
+      // 5 секунд выдержано — фиксируем Точку X
+      _standingY = bodyY;
+      _currentPhase = ProstrationPhase.calibrationComplete;
+      return const PoseAnalysisResult(calibrationJustCompleted: true);
+    }
+
+    return const PoseAnalysisResult();
+  }
+
+  /// Обновляет фазу на основе текущего опускания от Точки X.
+  PoseAnalysisResult _updatePhase(double dropFromStanding) {
     switch (_currentPhase) {
       case ProstrationPhase.calibrating:
+      case ProstrationPhase.calibrationComplete:
         break;
 
       case ProstrationPhase.standing:
-        // Точка опустилась ниже порога — начало простирания
         if (dropFromStanding > AppConstants.headDownThreshold) {
           _currentPhase = ProstrationPhase.goingDown;
         }
@@ -136,16 +227,13 @@ class ProstrationClassifier {
 
       case ProstrationPhase.goingDown:
         if (dropFromStanding > AppConstants.headDownThreshold * 1.5) {
-          // Опустился достаточно низко — засчитываем как простёртую позицию
           _currentPhase = ProstrationPhase.prostrated;
         } else if (dropFromStanding < AppConstants.headUpThreshold) {
-          // Не успел опуститься — вернулся вверх
           _currentPhase = ProstrationPhase.standing;
         }
         break;
 
       case ProstrationPhase.prostrated:
-        // Начал подниматься
         if (dropFromStanding < AppConstants.headDownThreshold) {
           _currentPhase = ProstrationPhase.gettingUp;
         }
@@ -153,69 +241,104 @@ class ProstrationClassifier {
 
       case ProstrationPhase.gettingUp:
         if (dropFromStanding < AppConstants.headUpThreshold) {
-          // Вернулся в стоячую позицию — простирание засчитано!
+          // Вернулся к Точке X — простирание засчитано!
           _currentPhase = ProstrationPhase.standing;
 
-          // Проверяем кулдаун
           final now = DateTime.now();
           if (_lastProstrationTime == null ||
               now.difference(_lastProstrationTime!).inMilliseconds >
                   AppConstants.prostrationCooldownMs) {
             _lastProstrationTime = now;
-            return true;
+            return const PoseAnalysisResult(prostrationCompleted: true);
           }
         } else if (dropFromStanding > AppConstants.headDownThreshold * 1.5) {
-          // Снова опустился
           _currentPhase = ProstrationPhase.prostrated;
         }
         break;
     }
 
-    return false;
+    return const PoseAnalysisResult();
   }
 
-  /// Извлекает нормализованное положение тела из списка точек MoveNet.
-  /// Основная точка: плечи (среднее leftShoulder + rightShoulder).
-  /// Fallback: бёдра (среднее leftHip + rightHip).
-  HeadInfo _extractBodyPosition(List<PoseLandmark> landmarks) {
-    if (landmarks.length < 17) {
-      return HeadInfo(
-        confidence: 0.0,
-        phase: _currentPhase,
-        standingY: _standingY,
-        source: BodyTrackingSource.none,
-      );
-    }
+  /// Пытается определить Y/X тела из реальных landmarks.
+  /// Возвращает null если ни плечи ни бёдра не видны.
+  _DetectedPoint? _detectBodyPosition(List<PoseLandmark> landmarks) {
+    if (landmarks.length < 17) return null;
 
-    // Пробуем плечи
     final leftShoulder = landmarks[MoveNetLandmark.leftShoulder];
     final rightShoulder = landmarks[MoveNetLandmark.rightShoulder];
 
     if (leftShoulder.score >= AppConstants.minPoseConfidence &&
         rightShoulder.score >= AppConstants.minPoseConfidence) {
-      return HeadInfo(
-        normalizedX: (leftShoulder.x + rightShoulder.x) / 2,
-        normalizedY: (leftShoulder.y + rightShoulder.y) / 2,
-        confidence: (leftShoulder.score + rightShoulder.score) / 2,
-        phase: _currentPhase,
-        standingY: _standingY,
+      return _DetectedPoint(
+        y: (leftShoulder.y + rightShoulder.y) / 2,
+        x: (leftShoulder.x + rightShoulder.x) / 2,
         source: BodyTrackingSource.shoulders,
       );
     }
 
-    // Fallback: бёдра
     final leftHip = landmarks[MoveNetLandmark.leftHip];
     final rightHip = landmarks[MoveNetLandmark.rightHip];
 
     if (leftHip.score >= AppConstants.minPoseConfidence &&
         rightHip.score >= AppConstants.minPoseConfidence) {
+      return _DetectedPoint(
+        y: (leftHip.y + rightHip.y) / 2,
+        x: (leftHip.x + rightHip.x) / 2,
+        source: BodyTrackingSource.hips,
+      );
+    }
+
+    return null;
+  }
+
+  /// Получить текущую информацию о точке тела (для отображения)
+  HeadInfo getLastHeadInfo(List<PoseLandmark> landmarks) {
+    final detected = _detectBodyPosition(landmarks);
+
+    // Прогресс калибровки
+    double calibProgress = 0.0;
+    if (_currentPhase == ProstrationPhase.calibrating &&
+        _calibrationStableStart != null) {
+      final elapsed =
+          DateTime.now().difference(_calibrationStableStart!).inMilliseconds /
+              1000.0;
+      calibProgress =
+          (elapsed / AppConstants.calibrationDurationSeconds).clamp(0.0, 1.0);
+    } else if (_currentPhase != ProstrationPhase.calibrating) {
+      calibProgress = 1.0;
+    }
+
+    if (detected != null) {
+      final lShoulder = landmarks[MoveNetLandmark.leftShoulder];
+      final rShoulder = landmarks[MoveNetLandmark.rightShoulder];
+      final conf = detected.source == BodyTrackingSource.shoulders
+          ? (lShoulder.score + rShoulder.score) / 2
+          : (landmarks[MoveNetLandmark.leftHip].score +
+                  landmarks[MoveNetLandmark.rightHip].score) /
+              2;
+
       return HeadInfo(
-        normalizedX: (leftHip.x + rightHip.x) / 2,
-        normalizedY: (leftHip.y + rightHip.y) / 2,
-        confidence: (leftHip.score + rightHip.score) / 2,
+        normalizedX: detected.x,
+        normalizedY: detected.y,
+        confidence: conf,
         phase: _currentPhase,
         standingY: _standingY,
-        source: BodyTrackingSource.hips,
+        source: detected.source,
+        calibrationProgress: calibProgress,
+      );
+    }
+
+    // Temporal smoothing для отображения
+    if (_lastKnownY != null && _lastKnownX != null) {
+      return HeadInfo(
+        normalizedX: _lastKnownX,
+        normalizedY: _lastKnownY,
+        confidence: 0.0,
+        phase: _currentPhase,
+        standingY: _standingY,
+        source: BodyTrackingSource.lastKnown,
+        calibrationProgress: calibProgress,
       );
     }
 
@@ -224,19 +347,18 @@ class ProstrationClassifier {
       phase: _currentPhase,
       standingY: _standingY,
       source: BodyTrackingSource.none,
+      calibrationProgress: calibProgress,
     );
-  }
-
-  /// Получить текущую информацию о точке тела (для отображения)
-  HeadInfo getLastHeadInfo(List<PoseLandmark> landmarks) {
-    return _extractBodyPosition(landmarks);
   }
 
   /// Сброс состояния — начинаем калибровку заново
   void reset() {
     _currentPhase = ProstrationPhase.calibrating;
-    _calibrationSamples.clear();
+    _calibrationStableStart = null;
+    _calibrationReferenceY = null;
     _standingY = null;
+    _lastKnownY = null;
+    _lastKnownX = null;
     _lastProstrationTime = null;
   }
 
@@ -244,4 +366,14 @@ class ProstrationClassifier {
   void resetCounter() {
     _lastProstrationTime = null;
   }
+}
+
+/// Внутренний класс для хранения обнаруженной позиции тела
+class _DetectedPoint {
+  final double y;
+  final double x;
+  final BodyTrackingSource source;
+
+  const _DetectedPoint(
+      {required this.y, required this.x, required this.source});
 }

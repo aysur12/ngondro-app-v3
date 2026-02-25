@@ -3,6 +3,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import 'prostration_classifier.dart';
 
 typedef ProstrationDetectedCallback = void Function();
+typedef CalibrationCompletedCallback = void Function();
 typedef HeadInfoUpdatedCallback = void Function(HeadInfo info);
 typedef LogCallback = void Function(String message);
 
@@ -16,6 +17,7 @@ class PoseDetectorService {
   Interpreter? _interpreter;
   final ProstrationClassifier _classifier;
   final ProstrationDetectedCallback onProstrationDetected;
+  final CalibrationCompletedCallback? onCalibrationCompleted;
   final HeadInfoUpdatedCallback? onHeadInfoUpdated;
   final LogCallback? onLog;
 
@@ -31,6 +33,7 @@ class PoseDetectorService {
 
   PoseDetectorService({
     required this.onProstrationDetected,
+    this.onCalibrationCompleted,
     this.onHeadInfoUpdated,
     this.onLog,
   }) : _classifier = ProstrationClassifier() {
@@ -41,6 +44,12 @@ class PoseDetectorService {
   bool get isCalibrated => _classifier.isCalibrated;
   bool get isLoaded => _isLoaded;
   String? get loadError => _loadError;
+
+  /// Вызывается после завершения воспроизведения calibration-end аудио
+  void onCalibrationAudioFinished() {
+    _classifier.onCalibrationAudioFinished();
+    _log('Аудио калибровки завершено, начинаем отслеживание');
+  }
 
   Future<void> _loadModel() async {
     try {
@@ -76,7 +85,7 @@ class PoseDetectorService {
 Тип входного тензора: $_tensorInputType
 Фаза: ${_classifier.currentPhase.name}
 Откалибровано: ${_classifier.isCalibrated}
-Standing Y: ${_classifier.standingY?.toStringAsFixed(3) ?? 'нет'}
+Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'нет'}
 Обработано кадров: $_frameCount
 Ошибок препроцессинга: $_preprocessErrorCount
 Ошибок инференса: $_inferenceErrorCount''';
@@ -99,7 +108,7 @@ Standing Y: ${_classifier.standingY?.toStringAsFixed(3) ?? 'нет'}
     _frameCount++;
 
     try {
-      // Строим входной тензор [1, 192, 192, 3] как вложенный List
+      // Строим входной тензор [1,192,192,3] как вложенный List
       final input = _buildInputTensor(cameraImage);
       if (input == null) {
         _preprocessErrorCount++;
@@ -150,10 +159,15 @@ Standing Y: ${_classifier.standingY?.toStringAsFixed(3) ?? 'нет'}
       }
 
       // Анализируем позу
-      final prostrationCompleted = _classifier.analyzeLandmarks(landmarks);
-      if (prostrationCompleted) {
+      final result = _classifier.analyzeLandmarks(landmarks);
+      if (result.prostrationCompleted) {
         _log('✓ ПРОСТИРАНИЕ ЗАСЧИТАНО! (кадр #$_frameCount)');
         onProstrationDetected();
+      }
+      if (result.calibrationJustCompleted) {
+        _log('✓ КАЛИБРОВКА ЗАВЕРШЕНА (кадр #$_frameCount), '
+            'standingY=${_classifier.standingY?.toStringAsFixed(3)}');
+        onCalibrationCompleted?.call();
       }
 
       // Передаём информацию для отображения
