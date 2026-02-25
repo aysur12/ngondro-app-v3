@@ -4,7 +4,7 @@ import '../../../../ml/pose_detector_service.dart';
 import '../../../../ml/prostration_classifier.dart';
 import '../../../../core/constants/app_constants.dart';
 
-/// Виджет предпросмотра камеры с ML pose detection и отображением головы
+/// Виджет предпросмотра камеры с ML pose detection и отображением позиции тела
 class CameraPreviewWidget extends StatefulWidget {
   final VoidCallback onProstrationDetected;
 
@@ -86,7 +86,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     super.dispose();
   }
 
-  /// Цвет квадрата головы в зависимости от фазы простирания
+  /// Цвет квадрата в зависимости от фазы простирания
   Color _getHeadBoxColor(ProstrationPhase phase) {
     switch (phase) {
       case ProstrationPhase.calibrating:
@@ -187,7 +187,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
               ),
               if (headInfo != null && headInfo.isDetected)
                 Text(
-                  'Уверенность: ${(headInfo.confidence * 100).toStringAsFixed(0)}%',
+                  '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : ''} ${(headInfo.confidence * 100).toStringAsFixed(0)}%',
                   style: const TextStyle(color: Colors.grey, fontSize: 11),
                 ),
             ],
@@ -208,7 +208,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                   child: CameraPreview(_controller!),
                 ),
 
-                // Наложение: зелёный квадрат вокруг головы
+                // Наложение: квадрат вокруг отслеживаемой точки тела
                 if (headInfo != null && headInfo.isDetected)
                   LayoutBuilder(
                     builder: (context, constraints) {
@@ -255,7 +255,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   }
 }
 
-/// Рисует квадрат вокруг головы человека
+/// Рисует квадрат вокруг отслеживаемой точки тела (плечи или бёдра)
 class HeadBoxPainter extends CustomPainter {
   final HeadInfo headInfo;
   final Color color;

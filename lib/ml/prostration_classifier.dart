@@ -10,9 +10,16 @@ enum ProstrationPhase {
   gettingUp, // Поднимается
 }
 
-/// Информация о положении головы для отображения
+/// Источник точки тела, используемой для отслеживания
+enum BodyTrackingSource {
+  shoulders, // Плечи (основной)
+  hips, // Бёдра (fallback)
+  none, // Не определено
+}
+
+/// Информация о положении тела для отображения
 class HeadInfo {
-  /// Нормализованные координаты центра головы (0.0..1.0)
+  /// Нормализованные координаты отслеживаемой точки (0.0..1.0)
   final double? normalizedX;
   final double? normalizedY;
 
@@ -25,22 +32,26 @@ class HeadInfo {
   /// Нормализованная Y-позиция "стоячего" положения (после калибровки)
   final double? standingY;
 
+  /// Источник точки, по которой идёт отслеживание
+  final BodyTrackingSource source;
+
   const HeadInfo({
     this.normalizedX,
     this.normalizedY,
     required this.confidence,
     required this.phase,
     this.standingY,
+    this.source = BodyTrackingSource.none,
   });
 
   bool get isDetected => normalizedX != null && normalizedY != null;
 }
 
-/// Классификатор простираний на основе отслеживания положения головы
+/// Классификатор простираний на основе отслеживания положения плеч/бёдер
 class ProstrationClassifier {
   ProstrationPhase _currentPhase = ProstrationPhase.calibrating;
 
-  // Калибровка: накапливаем Y-позиции головы в "стоячем" положении
+  // Калибровка: накапливаем Y-позиции в "стоячем" положении
   final List<double> _calibrationSamples = [];
   double? _standingY; // Нормализованная Y-позиция когда человек стоит
 
@@ -55,14 +66,14 @@ class ProstrationClassifier {
   /// [imageWidth] и [imageHeight] — размеры изображения в пикселях.
   bool analyzePose(Pose pose,
       {double imageWidth = 1.0, double imageHeight = 1.0}) {
-    final headInfo = _extractHeadPosition(pose, imageWidth, imageHeight);
-    if (!headInfo.isDetected) return false;
+    final bodyInfo = _extractBodyPosition(pose, imageWidth, imageHeight);
+    if (!bodyInfo.isDetected) return false;
 
-    final headY = headInfo.normalizedY!;
+    final bodyY = bodyInfo.normalizedY!;
 
     // --- Калибровка ---
     if (_currentPhase == ProstrationPhase.calibrating) {
-      _calibrationSamples.add(headY);
+      _calibrationSamples.add(bodyY);
       if (_calibrationSamples.length >= AppConstants.calibrationFrames) {
         // Берём медиану для устойчивости к выбросам
         _calibrationSamples.sort();
@@ -74,16 +85,16 @@ class ProstrationClassifier {
 
     if (_standingY == null) return false;
 
-    // Насколько голова опустилась ниже стоячей позиции
+    // Насколько точка опустилась ниже стоячей позиции
     // (в нормализованных координатах, Y растёт вниз)
-    final dropFromStanding = headY - _standingY!;
+    final dropFromStanding = bodyY - _standingY!;
 
     switch (_currentPhase) {
       case ProstrationPhase.calibrating:
         break;
 
       case ProstrationPhase.standing:
-        // Голова опустилась ниже порога — начало простирания
+        // Точка опустилась ниже порога — начало простирания
         if (dropFromStanding > AppConstants.headDownThreshold) {
           _currentPhase = ProstrationPhase.goingDown;
         }
@@ -129,35 +140,44 @@ class ProstrationClassifier {
     return false;
   }
 
-  /// Извлекает нормализованное положение головы из позы.
-  /// Использует нос как основную точку, fallback на уши.
-  HeadInfo _extractHeadPosition(
+  /// Извлекает нормализованное положение тела из позы.
+  /// Основная точка: плечи (среднее leftShoulder + rightShoulder).
+  /// Fallback: бёдра (среднее leftHip + rightHip).
+  HeadInfo _extractBodyPosition(
       Pose pose, double imageWidth, double imageHeight) {
-    // Пробуем нос
-    final nose = pose.landmarks[PoseLandmarkType.nose];
-    if (nose != null && nose.likelihood >= AppConstants.minPoseConfidence) {
+    // Пробуем плечи
+    final leftShoulder = pose.landmarks[PoseLandmarkType.leftShoulder];
+    final rightShoulder = pose.landmarks[PoseLandmarkType.rightShoulder];
+
+    if (leftShoulder != null &&
+        rightShoulder != null &&
+        leftShoulder.likelihood >= AppConstants.minPoseConfidence &&
+        rightShoulder.likelihood >= AppConstants.minPoseConfidence) {
       return HeadInfo(
-        normalizedX: nose.x / imageWidth,
-        normalizedY: nose.y / imageHeight,
-        confidence: nose.likelihood,
+        normalizedX: (leftShoulder.x + rightShoulder.x) / 2 / imageWidth,
+        normalizedY: (leftShoulder.y + rightShoulder.y) / 2 / imageHeight,
+        confidence: (leftShoulder.likelihood + rightShoulder.likelihood) / 2,
         phase: _currentPhase,
         standingY: _standingY,
+        source: BodyTrackingSource.shoulders,
       );
     }
 
-    // Fallback: среднее между ушами
-    final leftEar = pose.landmarks[PoseLandmarkType.leftEar];
-    final rightEar = pose.landmarks[PoseLandmarkType.rightEar];
-    if (leftEar != null &&
-        rightEar != null &&
-        leftEar.likelihood >= AppConstants.minPoseConfidence &&
-        rightEar.likelihood >= AppConstants.minPoseConfidence) {
+    // Fallback: бёдра
+    final leftHip = pose.landmarks[PoseLandmarkType.leftHip];
+    final rightHip = pose.landmarks[PoseLandmarkType.rightHip];
+
+    if (leftHip != null &&
+        rightHip != null &&
+        leftHip.likelihood >= AppConstants.minPoseConfidence &&
+        rightHip.likelihood >= AppConstants.minPoseConfidence) {
       return HeadInfo(
-        normalizedX: (leftEar.x + rightEar.x) / 2 / imageWidth,
-        normalizedY: (leftEar.y + rightEar.y) / 2 / imageHeight,
-        confidence: (leftEar.likelihood + rightEar.likelihood) / 2,
+        normalizedX: (leftHip.x + rightHip.x) / 2 / imageWidth,
+        normalizedY: (leftHip.y + rightHip.y) / 2 / imageHeight,
+        confidence: (leftHip.likelihood + rightHip.likelihood) / 2,
         phase: _currentPhase,
         standingY: _standingY,
+        source: BodyTrackingSource.hips,
       );
     }
 
@@ -165,13 +185,14 @@ class ProstrationClassifier {
       confidence: 0.0,
       phase: _currentPhase,
       standingY: _standingY,
+      source: BodyTrackingSource.none,
     );
   }
 
-  /// Получить текущую информацию о голове (для отображения)
+  /// Получить текущую информацию о точке тела (для отображения)
   HeadInfo? getLastHeadInfo(Pose pose,
       {double imageWidth = 1.0, double imageHeight = 1.0}) {
-    return _extractHeadPosition(pose, imageWidth, imageHeight);
+    return _extractBodyPosition(pose, imageWidth, imageHeight);
   }
 
   /// Сброс состояния — начинаем калибровку заново

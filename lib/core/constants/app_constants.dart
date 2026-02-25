@@ -10,12 +10,13 @@ class AppConstants {
   // Sound asset path
   static const String bellSoundPath = 'sounds/bell.mp3';
 
-  // Head tracking thresholds (normalized 0.0..1.0, Y-axis: 0=top, 1=bottom)
-  // Порог опускания головы: если голова опустилась на X% от высоты кадра ниже
+  // Body tracking thresholds (normalized 0.0..1.0, Y-axis: 0=top, 1=bottom)
+  // Основная точка: плечи; fallback: бёдра.
+  // Порог опускания: если точка опустилась на X% от высоты кадра ниже
   // стоячей позиции — считаем что человек начал простирание
   static const double headDownThreshold = 0.25;
 
-  // Порог возврата: голова должна вернуться в пределах X% от стоячей позиции
+  // Порог возврата: точка должна вернуться в пределах X% от стоячей позиции
   static const double headUpThreshold = 0.10;
 
   // Количество кадров для автокалибровки стоячей позиции
