@@ -24,7 +24,7 @@ class CounterLoaded extends CounterState {
   const CounterLoaded({
     required this.totalCount,
     required this.sessionCount,
-    this.isCameraMode = false,
+    this.isCameraMode = true,
     this.isBellPlayed = false,
   });
 

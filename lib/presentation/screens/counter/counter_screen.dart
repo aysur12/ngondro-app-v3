@@ -6,7 +6,6 @@ import '../../../domain/usecases/get_total_count.dart';
 import '../../../domain/usecases/save_count.dart';
 import '../../../domain/usecases/reset_session_count.dart';
 import '../../../services/sound_service.dart';
-import '../../../core/theme/app_colors.dart';
 import 'bloc/counter_bloc.dart';
 import 'bloc/counter_event.dart';
 import 'bloc/counter_state.dart';
@@ -71,15 +70,11 @@ class _CounterScreenContentState extends State<_CounterScreenContent>
             builder: (context, state) {
               if (state is! CounterLoaded) return const SizedBox.shrink();
               return IconButton(
-                icon: Icon(
-                  state.isCameraMode ? Icons.videocam : Icons.videocam_off,
-                  color: state.isCameraMode ? AppColors.primary : null,
-                ),
-                tooltip: state.isCameraMode
-                    ? 'Switch to Manual'
-                    : 'Switch to Camera',
+                icon: const Icon(Icons.self_improvement),
+                tooltip: 'Prostration',
                 onPressed: () {
-                  context.read<CounterBloc>().add(const CameraModeToggled());
+                  HapticFeedback.mediumImpact();
+                  context.read<CounterBloc>().add(const CounterIncremented());
                 },
               );
             },
@@ -124,44 +119,23 @@ class _CounterScreenContentState extends State<_CounterScreenContent>
               totalCount: state.totalCount,
               sessionCount: state.sessionCount,
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 12),
 
-            // Режим камеры или ручной счётчик
-            if (state.isCameraMode) ...[
-              Expanded(
-                child: CameraPreviewWidget(
-                  onProstrationDetected: () {
-                    HapticFeedback.mediumImpact();
-                    context.read<CounterBloc>().add(const CounterIncremented());
-                  },
-                ),
+            // Камера всегда активна
+            Expanded(
+              child: CameraPreviewWidget(
+                onProstrationDetected: () {
+                  HapticFeedback.mediumImpact();
+                  context.read<CounterBloc>().add(const CounterIncremented());
+                },
               ),
-              const SizedBox(height: 16),
-              const Text(
-                'Camera is detecting prostrations automatically',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey),
-              ),
-            ] else ...[
-              // Ручная кнопка
-              Expanded(
-                child: Center(
-                  child: _ManualCounterButton(
-                    onPressed: () {
-                      HapticFeedback.mediumImpact();
-                      context
-                          .read<CounterBloc>()
-                          .add(const CounterIncremented());
-                    },
-                  ),
-                ),
-              ),
-              const Text(
-                'Tap the button for each prostration',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey),
-              ),
-            ],
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Camera is detecting prostrations automatically',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
             const SizedBox(height: 24),
           ],
         ),
@@ -189,89 +163,6 @@ class _CounterScreenContentState extends State<_CounterScreenContent>
             child: const Text('Reset'),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Кнопка ручного подсчёта
-class _ManualCounterButton extends StatefulWidget {
-  final VoidCallback onPressed;
-
-  const _ManualCounterButton({required this.onPressed});
-
-  @override
-  State<_ManualCounterButton> createState() => _ManualCounterButtonState();
-}
-
-class _ManualCounterButtonState extends State<_ManualCounterButton>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _animController;
-  late Animation<double> _scaleAnim;
-
-  @override
-  void initState() {
-    super.initState();
-    _animController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 100),
-    );
-    _scaleAnim = Tween<double>(begin: 1.0, end: 0.9).animate(
-      CurvedAnimation(parent: _animController, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _animController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ScaleTransition(
-      scale: _scaleAnim,
-      child: GestureDetector(
-        onTapDown: (_) => _animController.forward(),
-        onTapUp: (_) {
-          _animController.reverse();
-          widget.onPressed();
-        },
-        onTapCancel: () => _animController.reverse(),
-        child: Container(
-          width: 200,
-          height: 200,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: AppColors.primary,
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.primary.withValues(alpha: 0.4),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: const Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.self_improvement,
-                size: 64,
-                color: Colors.white,
-              ),
-              SizedBox(height: 8),
-              Text(
-                'Prostration',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
