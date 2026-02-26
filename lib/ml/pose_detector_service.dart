@@ -219,7 +219,7 @@ isFrontCamera: $_isFrontCamera
         _log('Кадр #$_frameCount | '
             'cam: ${cameraImage.width}x${cameraImage.height} | '
             'sensor=${sensorOrientation}° front=$isFrontCamera | '
-            'nose_raw: (y=${rawNose?.y.toStringAsFixed(2)}, x=${rawNose?.x.toStringAsFixed(2)}) | '
+            'nose_raw: (y=${rawNose?.y.toStringAsFixed(2)}, x=${rawNose?.x.toStringAsFixed(2)}) s=${rawNose?.score.toStringAsFixed(2)} | '
             'nose_screen: (x=${nose.x.toStringAsFixed(2)}, y=${nose.y.toStringAsFixed(2)}) '
             's=${nose.score.toStringAsFixed(2)} | '
             'phase: ${_classifier.currentPhase.name}');

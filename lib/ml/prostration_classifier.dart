@@ -11,6 +11,9 @@ enum ProstrationPhase {
 /// Источник точки тела, используемой для отслеживания
 enum BodyTrackingSource {
   head, // Голова/нос (основной)
+  ear, // Ухо (fallback #1)
+  shoulder, // Плечи (fallback #2)
+  hip, // Бёдра (fallback #3)
   lastKnown, // Последнее известное положение (temporal smoothing)
   none, // Не определено
 }
@@ -116,6 +119,8 @@ class ProstrationClassifier {
   DateTime? _calibrationStableStart; // Когда начался неподвижный период
   double? _calibrationReferenceY; // Y при начале неподвижного периода
   double? _standingY; // Точка X — окончательная стоячая позиция
+  BodyTrackingSource?
+      _calibratedSource; // Источник точки, использованный при калибровке
 
   // Temporal smoothing — последнее известное положение плеч
   double? _lastKnownY;
@@ -147,8 +152,11 @@ class ProstrationClassifier {
   PoseAnalysisResult analyzeLandmarks(List<PoseLandmark> landmarks) {
     final now = DateTime.now();
 
-    // Пробуем получить реальное положение плеч/бёдер
-    final detected = _detectBodyPosition(landmarks);
+    // Пробуем получить реальное положение тела (иерархия: нос → уши → плечи → бёдра)
+    // После калибровки — используем только тот же тип источника, что был при калибровке,
+    // либо более "высокие" в иерархии (чтобы не было прыжков Y из-за смены источника).
+    final detected =
+        _detectBodyPosition(landmarks, requiredSource: _calibratedSource);
 
     // Обновляем temporal smoothing и время реального детектирования
     if (detected != null) {
@@ -171,7 +179,7 @@ class ProstrationClassifier {
 
     // --- Калибровка ---
     if (_currentPhase == ProstrationPhase.calibrating) {
-      return _handleCalibration(bodyY, now);
+      return _handleCalibration(bodyY, detected?.source, now);
     }
 
     // Ждём окончания аудио
@@ -190,7 +198,8 @@ class ProstrationClassifier {
 
   /// Обрабатывает калибровочную фазу.
   /// Проверяет стабильность Y в течение calibrationDurationSeconds секунд.
-  PoseAnalysisResult _handleCalibration(double bodyY, DateTime now) {
+  PoseAnalysisResult _handleCalibration(
+      double bodyY, BodyTrackingSource? source, DateTime now) {
     if (_calibrationReferenceY == null) {
       // Первое определение — запоминаем стартовую Y
       _calibrationReferenceY = bodyY;
@@ -212,8 +221,10 @@ class ProstrationClassifier {
         now.difference(_calibrationStableStart!).inMilliseconds / 1000.0;
 
     if (stableDuration >= AppConstants.calibrationDurationSeconds) {
-      // Время выдержано — фиксируем Точку X
+      // Время выдержано — фиксируем Точку X и источник отслеживания
       _standingY = bodyY;
+      _calibratedSource =
+          source; // Фиксируем источник для дальнейшего использования
       _currentPhase = ProstrationPhase.calibrationComplete;
       return const PoseAnalysisResult(calibrationJustCompleted: true);
     }
@@ -277,18 +288,115 @@ class ProstrationClassifier {
   }
 
   /// Пытается определить Y/X тела из реальных landmarks.
-  /// Возвращает null если нос не виден.
-  _DetectedPoint? _detectBodyPosition(List<PoseLandmark> landmarks) {
+  /// Иерархия: нос → уши → плечи → бёдра.
+  ///
+  /// [requiredSource] — если задан, ограничивает максимальный "уровень вниз".
+  /// Нельзя использовать точки, расположенные НИЖЕ по телу, чем источник калибровки.
+  /// Это предотвращает ложные срабатывания из-за разницы Y между носом и плечами.
+  ///
+  /// Нос (индекс 0) → уши (1) → плечи (2) → бёдра (3).
+  /// Если калибровались по носу → допускаем нос + уши (1 уровень запаса).
+  /// Если калибровались по ушам → допускаем нос + уши + плечи.
+  /// Если requiredSource == null (во время калибровки) — используем всю иерархию.
+  _DetectedPoint? _detectBodyPosition(List<PoseLandmark> landmarks,
+      {BodyTrackingSource? requiredSource}) {
     if (landmarks.length < 17) return null;
 
-    final nose = landmarks[MoveNetLandmark.nose];
+    // Порядок приоритетов источников в иерархии (меньший индекс = "выше" на теле)
+    const hierarchy = [
+      BodyTrackingSource.head,
+      BodyTrackingSource.ear,
+      BodyTrackingSource.shoulder,
+      BodyTrackingSource.hip,
+    ];
+    // maxAllowedIndex: индекс до которого (включительно) разрешено использовать.
+    // +1 к индексу калиброванного источника — разрешаем один уровень запаса вниз.
+    final calibratedIndex = requiredSource != null
+        ? hierarchy.indexOf(requiredSource)
+        : hierarchy.length - 1;
+    final maxAllowedIndex = requiredSource != null
+        ? (calibratedIndex + 1).clamp(0, hierarchy.length - 1)
+        : hierarchy.length - 1;
 
+    // 1. Нос (основной) — индекс 0, всегда разрешён
+    final nose = landmarks[MoveNetLandmark.nose];
     if (nose.score >= AppConstants.minPoseConfidence) {
       return _DetectedPoint(
         y: nose.y,
         x: nose.x,
         source: BodyTrackingSource.head,
+        score: nose.score,
       );
+    }
+
+    // 2. Уши (fallback #1) — индекс 1
+    if (maxAllowedIndex >= 1) {
+      final leftEar = landmarks[MoveNetLandmark.leftEar];
+      final rightEar = landmarks[MoveNetLandmark.rightEar];
+      final earPoints = [leftEar, rightEar]
+          .where((p) => p.score >= AppConstants.minPoseConfidence)
+          .toList();
+      if (earPoints.isNotEmpty) {
+        final avgY = earPoints.map((p) => p.y).reduce((a, b) => a + b) /
+            earPoints.length;
+        final avgX = earPoints.map((p) => p.x).reduce((a, b) => a + b) /
+            earPoints.length;
+        final avgScore = earPoints.map((p) => p.score).reduce((a, b) => a + b) /
+            earPoints.length;
+        return _DetectedPoint(
+          y: avgY,
+          x: avgX,
+          source: BodyTrackingSource.ear,
+          score: avgScore,
+        );
+      }
+    }
+
+    // 3. Плечи (fallback #2) — индекс 2
+    if (maxAllowedIndex >= 2) {
+      final leftShoulder = landmarks[MoveNetLandmark.leftShoulder];
+      final rightShoulder = landmarks[MoveNetLandmark.rightShoulder];
+      final shoulderPoints = [leftShoulder, rightShoulder]
+          .where((p) => p.score >= AppConstants.minPoseConfidence)
+          .toList();
+      if (shoulderPoints.isNotEmpty) {
+        final avgY = shoulderPoints.map((p) => p.y).reduce((a, b) => a + b) /
+            shoulderPoints.length;
+        final avgX = shoulderPoints.map((p) => p.x).reduce((a, b) => a + b) /
+            shoulderPoints.length;
+        final avgScore =
+            shoulderPoints.map((p) => p.score).reduce((a, b) => a + b) /
+                shoulderPoints.length;
+        return _DetectedPoint(
+          y: avgY,
+          x: avgX,
+          source: BodyTrackingSource.shoulder,
+          score: avgScore,
+        );
+      }
+    }
+
+    // 4. Бёдра (fallback #3) — индекс 3
+    if (maxAllowedIndex >= 3) {
+      final leftHip = landmarks[MoveNetLandmark.leftHip];
+      final rightHip = landmarks[MoveNetLandmark.rightHip];
+      final hipPoints = [leftHip, rightHip]
+          .where((p) => p.score >= AppConstants.minPoseConfidence)
+          .toList();
+      if (hipPoints.isNotEmpty) {
+        final avgY = hipPoints.map((p) => p.y).reduce((a, b) => a + b) /
+            hipPoints.length;
+        final avgX = hipPoints.map((p) => p.x).reduce((a, b) => a + b) /
+            hipPoints.length;
+        final avgScore = hipPoints.map((p) => p.score).reduce((a, b) => a + b) /
+            hipPoints.length;
+        return _DetectedPoint(
+          y: avgY,
+          x: avgX,
+          source: BodyTrackingSource.hip,
+          score: avgScore,
+        );
+      }
     }
 
     return null;
@@ -296,7 +404,8 @@ class ProstrationClassifier {
 
   /// Получить текущую информацию о точке тела (для отображения)
   HeadInfo getLastHeadInfo(List<PoseLandmark> landmarks) {
-    final detected = _detectBodyPosition(landmarks);
+    final detected = _detectBodyPosition(landmarks,
+        requiredSource: _calibratedSource);
 
     // Прогресс калибровки
     double calibProgress = 0.0;
@@ -312,12 +421,10 @@ class ProstrationClassifier {
     }
 
     if (detected != null) {
-      final conf = landmarks[MoveNetLandmark.nose].score;
-
       return HeadInfo(
         normalizedX: detected.x,
         normalizedY: detected.y,
-        confidence: conf,
+        confidence: detected.score,
         phase: _currentPhase,
         standingY: _standingY,
         source: detected.source,
@@ -353,6 +460,7 @@ class ProstrationClassifier {
     _calibrationStableStart = null;
     _calibrationReferenceY = null;
     _standingY = null;
+    _calibratedSource = null;
     _lastKnownY = null;
     _lastKnownX = null;
     _lastRealDetectionTime = null;
@@ -371,7 +479,11 @@ class _DetectedPoint {
   final double y;
   final double x;
   final BodyTrackingSource source;
+  final double score;
 
   const _DetectedPoint(
-      {required this.y, required this.x, required this.source});
+      {required this.y,
+      required this.x,
+      required this.source,
+      this.score = 1.0});
 }
