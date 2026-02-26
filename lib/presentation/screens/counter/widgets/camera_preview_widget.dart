@@ -292,7 +292,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                 children: [
                   if (headInfo != null && headInfo.isDetected)
                     Text(
-                      '${headInfo.source == BodyTrackingSource.shoulders ? 'Плечи' : headInfo.source == BodyTrackingSource.hips ? 'Бёдра' : headInfo.source == BodyTrackingSource.lastKnown ? 'Память' : ''} '
+                      '${headInfo.source == BodyTrackingSource.head ? 'Голова' : headInfo.source == BodyTrackingSource.lastKnown ? 'Память' : ''} '
                       '${headInfo.source != BodyTrackingSource.lastKnown ? '${(headInfo.confidence * 100).toStringAsFixed(0)}%' : ''}',
                       style: const TextStyle(color: Colors.grey, fontSize: 11),
                     ),

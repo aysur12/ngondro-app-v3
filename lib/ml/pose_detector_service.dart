@@ -145,16 +145,14 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
         if (score > maxScore) maxScore = score;
       }
 
-      final lShoulder = landmarks[MoveNetLandmark.leftShoulder];
-      final rShoulder = landmarks[MoveNetLandmark.rightShoulder];
+      final nose = landmarks[MoveNetLandmark.nose];
 
       // Логируем каждые 30 кадров
       if (_frameCount % 30 == 0) {
         _log('Кадр #$_frameCount | '
             'maxScore: ${maxScore.toStringAsFixed(2)} | '
-            'lShoulder: (${lShoulder.x.toStringAsFixed(2)}, ${lShoulder.y.toStringAsFixed(2)}) '
-            's=${lShoulder.score.toStringAsFixed(2)} | '
-            'rShoulder s=${rShoulder.score.toStringAsFixed(2)} | '
+            'nose: (${nose.x.toStringAsFixed(2)}, ${nose.y.toStringAsFixed(2)}) '
+            's=${nose.score.toStringAsFixed(2)} | '
             'phase: ${_classifier.currentPhase.name}');
       }
 

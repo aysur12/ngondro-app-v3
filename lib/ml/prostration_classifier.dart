@@ -10,8 +10,7 @@ enum ProstrationPhase {
 
 /// Источник точки тела, используемой для отслеживания
 enum BodyTrackingSource {
-  shoulders, // Плечи (основной)
-  hips, // Бёдра (fallback)
+  head, // Голова/нос (основной)
   lastKnown, // Последнее известное положение (temporal smoothing)
   none, // Не определено
 }
@@ -278,31 +277,17 @@ class ProstrationClassifier {
   }
 
   /// Пытается определить Y/X тела из реальных landmarks.
-  /// Возвращает null если ни плечи ни бёдра не видны.
+  /// Возвращает null если нос не виден.
   _DetectedPoint? _detectBodyPosition(List<PoseLandmark> landmarks) {
     if (landmarks.length < 17) return null;
 
-    final leftShoulder = landmarks[MoveNetLandmark.leftShoulder];
-    final rightShoulder = landmarks[MoveNetLandmark.rightShoulder];
+    final nose = landmarks[MoveNetLandmark.nose];
 
-    if (leftShoulder.score >= AppConstants.minPoseConfidence &&
-        rightShoulder.score >= AppConstants.minPoseConfidence) {
+    if (nose.score >= AppConstants.minPoseConfidence) {
       return _DetectedPoint(
-        y: (leftShoulder.y + rightShoulder.y) / 2,
-        x: (leftShoulder.x + rightShoulder.x) / 2,
-        source: BodyTrackingSource.shoulders,
-      );
-    }
-
-    final leftHip = landmarks[MoveNetLandmark.leftHip];
-    final rightHip = landmarks[MoveNetLandmark.rightHip];
-
-    if (leftHip.score >= AppConstants.minPoseConfidence &&
-        rightHip.score >= AppConstants.minPoseConfidence) {
-      return _DetectedPoint(
-        y: (leftHip.y + rightHip.y) / 2,
-        x: (leftHip.x + rightHip.x) / 2,
-        source: BodyTrackingSource.hips,
+        y: nose.y,
+        x: nose.x,
+        source: BodyTrackingSource.head,
       );
     }
 
@@ -327,13 +312,7 @@ class ProstrationClassifier {
     }
 
     if (detected != null) {
-      final lShoulder = landmarks[MoveNetLandmark.leftShoulder];
-      final rShoulder = landmarks[MoveNetLandmark.rightShoulder];
-      final conf = detected.source == BodyTrackingSource.shoulders
-          ? (lShoulder.score + rShoulder.score) / 2
-          : (landmarks[MoveNetLandmark.leftHip].score +
-                  landmarks[MoveNetLandmark.rightHip].score) /
-              2;
+      final conf = landmarks[MoveNetLandmark.nose].score;
 
       return HeadInfo(
         normalizedX: detected.x,
