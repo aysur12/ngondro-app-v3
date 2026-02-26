@@ -20,7 +20,7 @@ class AppConstants {
   // Основная точка: плечи; fallback: бёдра.
   // Порог опускания: если точка опустилась на X% от высоты кадра ниже
   // стоячей позиции — считаем что человек начал простирание
-  static const double headDownThreshold = 0.25;
+  static const double headDownThreshold = 0.10;
 
   // Порог возврата: точка должна вернуться в пределах X% от стоячей позиции
   static const double headUpThreshold = 0.10;
@@ -43,7 +43,7 @@ class AppConstants {
 
   // Таймаут потери реальных данных от камеры (секунды)
   // Если плечи/бёдра не детектируются дольше этого времени — сброс фазы в standing
-  static const int noDataTimeoutSeconds = 5;
+  static const int noDataTimeoutSeconds = 15;
 
   // Минимальный уровень уверенности для точек позы
   static const double minPoseConfidence = 0.5;
