@@ -207,12 +207,8 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
         return Colors.teal;
       case ProstrationPhase.standing:
         return Colors.green;
-      case ProstrationPhase.goingDown:
+      case ProstrationPhase.down:
         return Colors.orange;
-      case ProstrationPhase.prostrated:
-        return Colors.red;
-      case ProstrationPhase.gettingUp:
-        return Colors.blue;
     }
   }
 
@@ -224,12 +220,8 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
         return 'Калибровка завершена';
       case ProstrationPhase.standing:
         return 'Стоит';
-      case ProstrationPhase.goingDown:
-        return 'Опускается';
-      case ProstrationPhase.prostrated:
-        return 'Простёрт';
-      case ProstrationPhase.gettingUp:
-        return 'Поднимается';
+      case ProstrationPhase.down:
+        return 'Простирание...';
     }
   }
 

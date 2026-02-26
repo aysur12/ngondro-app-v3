@@ -37,6 +37,14 @@ class AppConstants {
   // Время между засчитыванием простираний (мс) — защита от дублей
   static const int prostrationCooldownMs = 1500;
 
+  // Минимальное время в фазе "down" для засчитывания простирания (секунды)
+  // Защита от случайного наклона: реальное простирание занимает ≥ 2 секунды
+  static const int minDownDurationSeconds = 2;
+
+  // Таймаут потери реальных данных от камеры (секунды)
+  // Если плечи/бёдра не детектируются дольше этого времени — сброс фазы в standing
+  static const int noDataTimeoutSeconds = 5;
+
   // Минимальный уровень уверенности для точек позы
   static const double minPoseConfidence = 0.5;
 

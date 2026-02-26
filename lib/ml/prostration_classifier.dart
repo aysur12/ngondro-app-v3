@@ -1,13 +1,11 @@
 import '../core/constants/app_constants.dart';
 
-/// Фазы простирания
+/// Фазы простирания (двухфазный автомат)
 enum ProstrationPhase {
   calibrating, // Идёт калибровка — человек стоит неподвижно
   calibrationComplete, // Калибровка завершена, воспроизводится аудио
-  standing, // Стоит прямо (верхняя точка)
-  goingDown, // Опускается
-  prostrated, // Внизу (лёжа на полу)
-  gettingUp, // Поднимается
+  standing, // Стоит прямо (верхняя точка) — ожидание опускания
+  down, // Опустился ниже порога — ждём возврата
 }
 
 /// Источник точки тела, используемой для отслеживания
@@ -101,11 +99,17 @@ class PoseAnalysisResult {
   });
 }
 
-/// Классификатор простираний.
-/// Новая логика:
-/// 1. Калибровка: 5 секунд стабильности плеч → запоминаем Точку X
-/// 2. Temporal smoothing: при потере плеч используем последнее известное Y
-/// 3. Простирание: Y вернулся в пределах headUpThreshold от Точки X
+/// Классификатор простираний — двухфазный автомат.
+///
+/// Логика:
+/// 1. Калибровка: 5 секунд стабильности плеч → запоминаем «стоячую» Y (Точка X)
+/// 2. standing → down: Y опустился на > headDownThreshold от Точки X
+/// 3. down → standing (+1): Y вернулся в пределах headUpThreshold от Точки X,
+///    при условии что в фазе down прошло ≥ minDownDurationSeconds
+/// 4. down → standing (без счёта): нет реальных данных > noDataTimeoutSeconds
+///
+/// Temporal smoothing: при потере плеч/бёдер используется lastKnownY,
+/// но фиксируется время последнего реального детектирования для таймаута.
 class ProstrationClassifier {
   ProstrationPhase _currentPhase = ProstrationPhase.calibrating;
 
@@ -117,6 +121,12 @@ class ProstrationClassifier {
   // Temporal smoothing — последнее известное положение плеч
   double? _lastKnownY;
   double? _lastKnownX;
+
+  // Время последнего реального детектирования (не smoothed)
+  DateTime? _lastRealDetectionTime;
+
+  // Время входа в фазу down
+  DateTime? _downPhaseStart;
 
   // Защита от двойного засчитывания
   DateTime? _lastProstrationTime;
@@ -136,18 +146,20 @@ class ProstrationClassifier {
   /// Анализирует список точек (17 точек MoveNet).
   /// Возвращает [PoseAnalysisResult].
   PoseAnalysisResult analyzeLandmarks(List<PoseLandmark> landmarks) {
+    final now = DateTime.now();
+
     // Пробуем получить реальное положение плеч/бёдер
     final detected = _detectBodyPosition(landmarks);
 
-    // Обновляем temporal smoothing
+    // Обновляем temporal smoothing и время реального детектирования
     if (detected != null) {
       _lastKnownY = detected.y;
       _lastKnownX = detected.x;
+      _lastRealDetectionTime = now;
     }
 
     // Определяем Y для анализа
     final double bodyY;
-
     if (detected != null) {
       bodyY = detected.y;
     } else if (_lastKnownY != null) {
@@ -160,7 +172,7 @@ class ProstrationClassifier {
 
     // --- Калибровка ---
     if (_currentPhase == ProstrationPhase.calibrating) {
-      return _handleCalibration(bodyY);
+      return _handleCalibration(bodyY, now);
     }
 
     // Ждём окончания аудио
@@ -171,17 +183,15 @@ class ProstrationClassifier {
     final standingY = _standingY;
     if (standingY == null) return const PoseAnalysisResult();
 
-    // Насколько точка опустилась ниже Точки X
+    // Насколько точка опустилась ниже Точки X (положительное = ниже стоячей)
     final dropFromStanding = bodyY - standingY;
 
-    return _updatePhase(dropFromStanding);
+    return _updatePhase(dropFromStanding, now);
   }
 
   /// Обрабатывает калибровочную фазу.
-  /// Проверяет стабильность Y в течение 5 секунд.
-  PoseAnalysisResult _handleCalibration(double bodyY) {
-    final now = DateTime.now();
-
+  /// Проверяет стабильность Y в течение calibrationDurationSeconds секунд.
+  PoseAnalysisResult _handleCalibration(double bodyY, DateTime now) {
     if (_calibrationReferenceY == null) {
       // Первое определение — запоминаем стартовую Y
       _calibrationReferenceY = bodyY;
@@ -203,7 +213,7 @@ class ProstrationClassifier {
         now.difference(_calibrationStableStart!).inMilliseconds / 1000.0;
 
     if (stableDuration >= AppConstants.calibrationDurationSeconds) {
-      // 5 секунд выдержано — фиксируем Точку X
+      // Время выдержано — фиксируем Точку X
       _standingY = bodyY;
       _currentPhase = ProstrationPhase.calibrationComplete;
       return const PoseAnalysisResult(calibrationJustCompleted: true);
@@ -212,8 +222,8 @@ class ProstrationClassifier {
     return const PoseAnalysisResult();
   }
 
-  /// Обновляет фазу на основе текущего опускания от Точки X.
-  PoseAnalysisResult _updatePhase(double dropFromStanding) {
+  /// Двухфазный автомат: standing ↔ down.
+  PoseAnalysisResult _updatePhase(double dropFromStanding, DateTime now) {
     switch (_currentPhase) {
       case ProstrationPhase.calibrating:
       case ProstrationPhase.calibrationComplete:
@@ -221,38 +231,45 @@ class ProstrationClassifier {
 
       case ProstrationPhase.standing:
         if (dropFromStanding > AppConstants.headDownThreshold) {
-          _currentPhase = ProstrationPhase.goingDown;
+          // Человек начал опускаться — входим в фазу down
+          _currentPhase = ProstrationPhase.down;
+          _downPhaseStart = now;
         }
         break;
 
-      case ProstrationPhase.goingDown:
-        if (dropFromStanding > AppConstants.headDownThreshold * 1.5) {
-          _currentPhase = ProstrationPhase.prostrated;
-        } else if (dropFromStanding < AppConstants.headUpThreshold) {
-          _currentPhase = ProstrationPhase.standing;
-        }
-        break;
-
-      case ProstrationPhase.prostrated:
-        if (dropFromStanding < AppConstants.headDownThreshold) {
-          _currentPhase = ProstrationPhase.gettingUp;
-        }
-        break;
-
-      case ProstrationPhase.gettingUp:
-        if (dropFromStanding < AppConstants.headUpThreshold) {
-          // Вернулся к Точке X — простирание засчитано!
-          _currentPhase = ProstrationPhase.standing;
-
-          final now = DateTime.now();
-          if (_lastProstrationTime == null ||
-              now.difference(_lastProstrationTime!).inMilliseconds >
-                  AppConstants.prostrationCooldownMs) {
-            _lastProstrationTime = now;
-            return const PoseAnalysisResult(prostrationCompleted: true);
+      case ProstrationPhase.down:
+        // Проверяем таймаут потери данных: если нет реальных данных > 5 сек —
+        // считаем что человек ушёл из кадра, сбрасываем без засчитывания
+        if (_lastRealDetectionTime != null) {
+          final noDataDuration =
+              now.difference(_lastRealDetectionTime!).inMilliseconds / 1000.0;
+          if (noDataDuration > AppConstants.noDataTimeoutSeconds) {
+            _currentPhase = ProstrationPhase.standing;
+            _downPhaseStart = null;
+            break;
           }
-        } else if (dropFromStanding > AppConstants.headDownThreshold * 1.5) {
-          _currentPhase = ProstrationPhase.prostrated;
+        }
+
+        // Проверяем возврат в стоячее положение
+        if (dropFromStanding < AppConstants.headUpThreshold) {
+          _currentPhase = ProstrationPhase.standing;
+
+          // Проверяем минимальное время в фазе down
+          final downDuration = _downPhaseStart != null
+              ? now.difference(_downPhaseStart!).inMilliseconds / 1000.0
+              : 0.0;
+          _downPhaseStart = null;
+
+          if (downDuration >= AppConstants.minDownDurationSeconds) {
+            // Простирание засчитывается — cooldown защита от дублей
+            if (_lastProstrationTime == null ||
+                now.difference(_lastProstrationTime!).inMilliseconds >
+                    AppConstants.prostrationCooldownMs) {
+              _lastProstrationTime = now;
+              return const PoseAnalysisResult(prostrationCompleted: true);
+            }
+          }
+          // Слишком быстро — не засчитываем (был просто наклон)
         }
         break;
     }
@@ -359,6 +376,8 @@ class ProstrationClassifier {
     _standingY = null;
     _lastKnownY = null;
     _lastKnownX = null;
+    _lastRealDetectionTime = null;
+    _downPhaseStart = null;
     _lastProstrationTime = null;
   }
 
