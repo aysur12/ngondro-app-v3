@@ -186,6 +186,24 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     super.dispose();
   }
 
+  /// Возвращает человекочитаемое название источника отслеживания
+  String _trackingSourceLabel(BodyTrackingSource source) {
+    switch (source) {
+      case BodyTrackingSource.head:
+        return 'Нос';
+      case BodyTrackingSource.ear:
+        return 'Ухо';
+      case BodyTrackingSource.shoulder:
+        return 'Плечи';
+      case BodyTrackingSource.hip:
+        return 'Бёдра';
+      case BodyTrackingSource.lastKnown:
+        return 'Память';
+      case BodyTrackingSource.none:
+        return '';
+    }
+  }
+
   Future<void> _copyDiagnostics() async {
     final diagnostics =
         _poseDetectorService?.getDiagnostics() ?? '(сервис не инициализирован)';
@@ -295,7 +313,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
                 children: [
                   if (headInfo != null && headInfo.isDetected)
                     Text(
-                      '${headInfo.source == BodyTrackingSource.head ? 'Голова' : headInfo.source == BodyTrackingSource.lastKnown ? 'Память' : ''} '
+                      '${_trackingSourceLabel(headInfo.source)} '
                       '${headInfo.source != BodyTrackingSource.lastKnown ? '${(headInfo.confidence * 100).toStringAsFixed(0)}%' : ''}',
                       style: const TextStyle(color: Colors.grey, fontSize: 11),
                     ),
