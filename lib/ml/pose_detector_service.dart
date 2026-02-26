@@ -31,6 +31,10 @@ class PoseDetectorService {
   int _preprocessErrorCount = 0;
   int _inferenceErrorCount = 0;
 
+  // Параметры камеры для трансформации координат
+  int _sensorOrientation = 0;
+  bool _isFrontCamera = true;
+
   PoseDetectorService({
     required this.onProstrationDetected,
     this.onCalibrationCompleted,
@@ -86,15 +90,72 @@ class PoseDetectorService {
 Фаза: ${_classifier.currentPhase.name}
 Откалибровано: ${_classifier.isCalibrated}
 Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'нет'}
+sensorOrientation: $_sensorOrientation°
+isFrontCamera: $_isFrontCamera
 Обработано кадров: $_frameCount
 Ошибок препроцессинга: $_preprocessErrorCount
 Ошибок инференса: $_inferenceErrorCount''';
   }
 
+  /// Трансформирует нормализованные координаты MoveNet (в пространстве
+  /// сырого кадра камеры) в экранные координаты Flutter CameraPreview.
+  ///
+  /// MoveNet возвращает (y, x) нормализованные в пространстве кадра YUV420.
+  /// Кадр физически повёрнут относительно экрана на [sensorOrientation] градусов.
+  /// Flutter CameraPreview компенсирует поворот автоматически.
+  /// Также учитывается зеркалирование фронтальной камеры.
+  ///
+  /// [frameWidth] и [frameHeight] — реальные размеры входного кадра YUV420.
+  PoseLandmark _transformLandmark(PoseLandmark raw, int sensorOrientation,
+      bool isFrontCamera, int frameWidth, int frameHeight) {
+    double tx, ty;
+
+    // Определяем поворот по sensorOrientation.
+    // Важно: для портретного режима Android:
+    //   sensorOrientation=90  → кадр повёрнут на 90° CCW (или 270° CW)
+    //   sensorOrientation=270 → кадр повёрнут на 270° CCW (или 90° CW)
+    //
+    // Соответствие raw(y,x) → screen(y,x):
+    //   0°:   ty=raw.y,       tx=raw.x
+    //   90°:  ty=raw.x,       tx=1-raw.y   (90° CCW)
+    //   180°: ty=1-raw.y,     tx=1-raw.x
+    //   270°: ty=1-raw.x,     tx=raw.y     (270° CCW = 90° CW)
+    switch (sensorOrientation) {
+      case 90:
+        ty = raw.x;
+        tx = 1.0 - raw.y;
+        break;
+      case 180:
+        ty = 1.0 - raw.y;
+        tx = 1.0 - raw.x;
+        break;
+      case 270:
+        ty = 1.0 - raw.x;
+        tx = raw.y;
+        break;
+      case 0:
+      default:
+        ty = raw.y;
+        tx = raw.x;
+        break;
+    }
+
+    // Фронтальная камера: CameraPreview зеркалит по горизонтали
+    if (isFrontCamera) {
+      tx = 1.0 - tx;
+    }
+
+    return PoseLandmark(y: ty, x: tx, score: raw.score);
+  }
+
   /// Обрабатывает кадр с камеры
-  Future<void> processImage(
-      CameraImage cameraImage, int sensorOrientation) async {
+  Future<void> processImage(CameraImage cameraImage, int sensorOrientation,
+      {bool isFrontCamera = true}) async {
     if (_isProcessing) return;
+
+    // Сохраняем параметры камеры для трансформации
+    _sensorOrientation = sensorOrientation;
+    _isFrontCamera = isFrontCamera;
 
     if (!_isLoaded || _interpreter == null) {
       if (_frameCount % 30 == 0) {
@@ -108,7 +169,7 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
     _frameCount++;
 
     try {
-      // Строим входной тензор [1,192,192,3] как вложенный List
+      // Строим входной тензор [1,256,256,3] как вложенный List
       final input = _buildInputTensor(cameraImage);
       if (input == null) {
         _preprocessErrorCount++;
@@ -134,14 +195,20 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
 
       _interpreter!.run(input, output);
 
-      // Парсим точки
+      // Парсим точки и сразу трансформируем координаты
       final landmarks = <PoseLandmark>[];
       double maxScore = 0;
+      PoseLandmark? rawNose;
       for (int i = 0; i < 17; i++) {
         final y = (output[0][0][i][0] as num).toDouble();
         final x = (output[0][0][i][1] as num).toDouble();
         final score = (output[0][0][i][2] as num).toDouble();
-        landmarks.add(PoseLandmark(y: y, x: x, score: score));
+        final raw = PoseLandmark(y: y, x: x, score: score);
+        if (i == MoveNetLandmark.nose) rawNose = raw;
+        // Трансформируем из пространства сырого кадра в экранное пространство
+        final transformed = _transformLandmark(raw, sensorOrientation,
+            isFrontCamera, cameraImage.width, cameraImage.height);
+        landmarks.add(transformed);
         if (score > maxScore) maxScore = score;
       }
 
@@ -150,8 +217,10 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
       // Логируем каждые 30 кадров
       if (_frameCount % 30 == 0) {
         _log('Кадр #$_frameCount | '
-            'maxScore: ${maxScore.toStringAsFixed(2)} | '
-            'nose: (${nose.x.toStringAsFixed(2)}, ${nose.y.toStringAsFixed(2)}) '
+            'cam: ${cameraImage.width}x${cameraImage.height} | '
+            'sensor=${sensorOrientation}° front=$isFrontCamera | '
+            'nose_raw: (y=${rawNose?.y.toStringAsFixed(2)}, x=${rawNose?.x.toStringAsFixed(2)}) | '
+            'nose_screen: (x=${nose.x.toStringAsFixed(2)}, y=${nose.y.toStringAsFixed(2)}) '
             's=${nose.score.toStringAsFixed(2)} | '
             'phase: ${_classifier.currentPhase.name}');
       }
@@ -183,7 +252,7 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
     }
   }
 
-  /// Создаёт входной тензор [1,192,192,3] из YUV420 изображения.
+  /// Создаёт входной тензор [1,256,256,3] из YUV420 изображения.
   /// TFLite принимает вложенный List структуру.
   List<List<List<List<int>>>>? _buildInputTensor(CameraImage image) {
     try {
@@ -203,7 +272,7 @@ Standing Y (Точка X): ${_classifier.standingY?.toStringAsFixed(3) ?? 'не�
       final uvRowStride = uPlane.bytesPerRow;
       final uvPixelStride = uPlane.bytesPerPixel ?? 1;
 
-      // [1][192][192][3]
+      // [1][256][256][3]
       final input = List.generate(
         1,
         (_) => List.generate(

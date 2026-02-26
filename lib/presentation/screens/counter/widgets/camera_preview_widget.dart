@@ -114,10 +114,13 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
         onLog: _addLog,
       );
 
+      final isFrontCamera = camera.lensDirection == CameraLensDirection.front;
+
       await _controller!.startImageStream((image) {
         _poseDetectorService?.processImage(
           image,
           camera.sensorOrientation,
+          isFrontCamera: isFrontCamera,
         );
       });
 
@@ -319,26 +322,24 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // Камера
+                // Камера с наложением прямоугольника отслеживания
                 AspectRatio(
                   aspectRatio: _controller!.value.aspectRatio,
-                  child: CameraPreview(_controller!),
-                ),
-
-                // Квадрат отслеживания точки тела
-                if (headInfo != null && headInfo.isDetected)
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      return CustomPaint(
-                        painter: HeadBoxPainter(
-                          headInfo: headInfo,
-                          color: boxColor,
-                          canvasSize:
-                              Size(constraints.maxWidth, constraints.maxHeight),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      CameraPreview(_controller!),
+                      // Квадрат отслеживания точки тела — поверх реальной области видео
+                      if (headInfo != null && headInfo.isDetected)
+                        CustomPaint(
+                          painter: HeadBoxPainter(
+                            headInfo: headInfo,
+                            color: boxColor,
+                          ),
                         ),
-                      );
-                    },
+                    ],
                   ),
+                ),
 
                 // Оверлей калибровки (фаза calibrating)
                 if (phase == ProstrationPhase.calibrating && !_showLogs)
@@ -575,18 +576,17 @@ class _CalibrationCompleteOverlay extends StatelessWidget {
 class HeadBoxPainter extends CustomPainter {
   final HeadInfo headInfo;
   final Color color;
-  final Size canvasSize;
 
   HeadBoxPainter({
     required this.headInfo,
     required this.color,
-    required this.canvasSize,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     if (!headInfo.isDetected) return;
 
+    // size здесь — это реальный размер CameraPreview (уже с правильным aspect ratio)
     final cx = headInfo.normalizedX! * size.width;
     final cy = headInfo.normalizedY! * size.height;
     final boxHalf = size.width * AppConstants.headBoxSize;

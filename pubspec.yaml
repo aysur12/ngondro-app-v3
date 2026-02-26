@@ -53,4 +53,5 @@ flutter:
     - assets/sounds/bell.mp3
     - assets/sounds/voice/en/calibration-start.mp3
     - assets/sounds/voice/en/calibration-end.mp3
+    - assets/ml/movenet_thunder.tflite
     - assets/ml/movenet_lightning.tflite
